@@ -82,6 +82,24 @@ class Settings(BaseSettings):
         default=False, description="Log all executed SQL statements (disabled by default)"
     )
 
+    # Document Storage Configuration
+    STORAGE_LOCAL_ROOT: str = Field(
+        default="data/storage",
+        description="Root directory for local filesystem document storage",
+    )
+    STORAGE_MAX_UPLOAD_SIZE_BYTES: int = Field(
+        default=25 * 1024 * 1024,  # 25 MB
+        ge=1024,
+        le=500 * 1024 * 1024,
+        description="Maximum upload file size allowed in bytes (default 25 MB)",
+    )
+    STORAGE_CHUNK_SIZE_BYTES: int = Field(
+        default=64 * 1024,  # 64 KB
+        ge=4096,
+        le=10 * 1024 * 1024,
+        description="Chunk size for streaming uploads to disk and hashing (default 64 KB)",
+    )
+
     @field_validator("DATABASE_URL")
     @classmethod
     def validate_database_url(cls, v: SecretStr) -> SecretStr:
