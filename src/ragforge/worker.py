@@ -24,8 +24,13 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from ragforge.core.config import Settings, get_settings
-from ragforge.db.models import Document, DocumentChunk, DocumentStatus
+from ragforge.db.models import ChunkEmbedding, Document, DocumentChunk, DocumentStatus
 from ragforge.services.chunker import ChunkingError, TextChunker
+from ragforge.services.embedding_provider import (
+    EmbeddingError,
+    EmbeddingProvider,
+    create_embedding_provider,
+)
 from ragforge.services.extractor import (
     DocumentBoundsExceededError,
     DocumentExtractor,
@@ -52,6 +57,7 @@ async def process_document(
     db: AsyncSession,
     storage: StorageEngine,
     settings: Settings,
+    embedding_provider: EmbeddingProvider | None = None,
 ) -> None:
     """Core document processing pipeline execution.
 
@@ -60,6 +66,7 @@ async def process_document(
         db: Scoped database session.
         storage: Storage engine to retrieve document payload.
         settings: Application settings.
+        embedding_provider: Provider to generate dense embeddings.
     """
     start_time = time.perf_counter()
     try:
@@ -81,14 +88,22 @@ async def process_document(
         return
 
     # Check eligibility
-    # If already processed, exit cleanly (idempotent no-op)
-    # If uploaded, queued, or failed (reprocess), proceed.
+    # If already processed and embeddings exist, exit cleanly (idempotent no-op)
+    # If chunks exist but embeddings are missing, allow backfill/recovery
     if document.status == DocumentStatus.PROCESSED.value:
-        logger.info(
-            "Document is already in PROCESSED state; skipping processing",
-            extra={"document_id": str(doc_uuid)},
+        # Check if chunks have embeddings
+        emb_check = await db.execute(
+            select(ChunkEmbedding)
+            .join(DocumentChunk, ChunkEmbedding.chunk_id == DocumentChunk.id)
+            .where(DocumentChunk.document_id == doc_uuid)
+            .limit(1)
         )
-        return
+        if emb_check.scalar_one_or_none() is not None:
+            logger.info(
+                "Document is already in PROCESSED state with embeddings; skipping",
+                extra={"document_id": str(doc_uuid)},
+            )
+            return
 
     # 2. Mark document as PROCESSING
     logger.info(
@@ -127,12 +142,23 @@ async def process_document(
         )
         chunks = chunker.chunk_document(extracted_pages)
 
-        # 6. Persist chunks and update document status to PROCESSED atomically
-        # Remove any existing chunks first to ensure idempotency on retries/reprocessing
+        # 6. Generate embeddings for chunks in bounded batches
+        provider = embedding_provider or create_embedding_provider(settings)
+        chunk_contents = [c.content for c in chunks]
+        batch_size = settings.EMBEDDING_BATCH_SIZE
+        all_embeddings: list[list[float]] = []
+
+        for i in range(0, len(chunk_contents), batch_size):
+            batch = chunk_contents[i : i + batch_size]
+            batch_vectors = await provider.embed_texts(batch)
+            all_embeddings.extend(batch_vectors)
+
+        # 7. Persist chunks and embeddings atomically in one database transaction
+        # Remove any existing chunks first (cascades to chunk_embeddings) for idempotency
         del_stmt = delete(DocumentChunk).where(DocumentChunk.document_id == doc_uuid)
         await db.execute(del_stmt)
 
-        for chunk_data in chunks:
+        for chunk_data, vector in zip(chunks, all_embeddings, strict=True):
             chunk_row = DocumentChunk(
                 document_id=doc_uuid,
                 chunk_index=chunk_data.chunk_index,
@@ -142,6 +168,16 @@ async def process_document(
                 token_count_estimate=chunk_data.token_count_estimate,
             )
             db.add(chunk_row)
+            await db.flush()  # populate chunk_row.id for foreign key
+
+            embedding_row = ChunkEmbedding(
+                chunk_id=chunk_row.id,
+                provider=provider.provider_name,
+                model_name=provider.model_name,
+                dimension=len(vector),
+                embedding=vector,
+            )
+            db.add(embedding_row)
 
         document.status = DocumentStatus.PROCESSED.value
         document.error_code = None
@@ -151,10 +187,12 @@ async def process_document(
 
         elapsed = time.perf_counter() - start_time
         logger.info(
-            "Document successfully parsed and chunked",
+            "Document successfully parsed, chunked, and embedded",
             extra={
                 "document_id": str(doc_uuid),
                 "chunks_count": len(chunks),
+                "embedding_model": provider.model_name,
+                "dimension": provider.dimension,
                 "duration_seconds": round(elapsed, 3),
                 "status": DocumentStatus.PROCESSED.value,
             },
@@ -166,12 +204,13 @@ async def process_document(
         MalformedDocumentError,
         ExtractionError,
         ChunkingError,
+        EmbeddingError,
     ) as exc:
-        # Controlled extraction or chunking error
+        # Controlled extraction, chunking, or embedding error
         await db.rollback()
         elapsed = time.perf_counter() - start_time
         logger.warning(
-            "Document processing failed with known extraction/chunking error",
+            "Document processing failed with known pipeline error",
             extra={
                 "document_id": str(doc_uuid),
                 "error_code": exc.error_code,
@@ -207,6 +246,7 @@ async def process_document_job(ctx: dict[str, Any], document_id: str) -> None:
     session_factory: async_sessionmaker[AsyncSession] = ctx["session_factory"]
     storage: StorageEngine = ctx["storage"]
     settings: Settings = ctx["settings"]
+    embedding_provider: EmbeddingProvider = ctx["embedding_provider"]
 
     async with get_worker_db_session(session_factory) as session:
         await process_document(
@@ -214,11 +254,12 @@ async def process_document_job(ctx: dict[str, Any], document_id: str) -> None:
             db=session,
             storage=storage,
             settings=settings,
+            embedding_provider=embedding_provider,
         )
 
 
 async def startup(ctx: dict[str, Any]) -> None:
-    """Worker startup hook initializing async engine, storage, and settings."""
+    """Worker startup hook initializing async engine, storage, settings, and embedding model."""
     settings = get_settings()
     engine = create_async_engine(
         settings.DATABASE_URL.get_secret_value(),
@@ -233,12 +274,21 @@ async def startup(ctx: dict[str, Any]) -> None:
         expire_on_commit=False,
     )
     storage = LocalFilesystemStorage(settings.STORAGE_LOCAL_ROOT)
+    embedding_provider = create_embedding_provider(settings)
 
     ctx["engine"] = engine
     ctx["session_factory"] = session_factory
     ctx["storage"] = storage
     ctx["settings"] = settings
-    logger.info("ARQ Document Worker initialized successfully.")
+    ctx["embedding_provider"] = embedding_provider
+    logger.info(
+        "ARQ Document Worker initialized successfully with embedding provider",
+        extra={
+            "provider": embedding_provider.provider_name,
+            "model": embedding_provider.model_name,
+            "dimension": embedding_provider.dimension,
+        },
+    )
 
 
 async def shutdown(ctx: dict[str, Any]) -> None:

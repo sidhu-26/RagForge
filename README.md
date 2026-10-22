@@ -340,12 +340,209 @@ curl -X POST "http://localhost:8000/api/v1/documents/e8632d16-b302-464b-b862-4c3
    - Verify worker is running: `make worker`
    - Verify Redis connection string in `.env` matches `RAGFORGE_REDIS_URL`.
 
-### 4. Current Limitations & Milestone Boundaries
-- **No OCR**: Scanned documents and image-only PDFs will fail with `DOCUMENT_EMPTY`.
-- **No Embeddings**: Vector representations are not yet computed.
-- **No Vector Search**: Storage and retrieval are relational via PostgreSQL and local disk.
-- **No SLM / LLM Integration**: Generative responses are not yet invoked.
-- **No Public Authentication**: The API is private and intended for local development.
-- **No Antivirus Scanner**: File inspection relies on MIME/signature checks without live malware engine scanning.
+### 3. Embeddings & Semantic Retrieval (Milestone 5)
+
+RAGForge features an embedding generation and nearest-neighbor retrieval pipeline powered by PostgreSQL and the `pgvector` extension.
+
+#### End-to-End Pipeline
+```
+Upload → Redis/ARQ worker → Extract → Chunk → Generate Embeddings → Persist Vectors → Semantic Search (pgvector)
+```
+
+#### Starting pgvector-Enabled PostgreSQL
+RAGForge uses `pgvector/pgvector:pg16` in `docker-compose.yml`. Existing volumes are preserved without data loss.
+```bash
+docker compose up -d postgres redis
+# Apply Alembic vector migration
+uv run alembic upgrade head
+```
+
+#### Configuring Embedding Providers
+RAGForge supports two embedding backends configured via `.env`:
+
+1. **Local Mode (`EMBEDDING_PROVIDER=local`, Default)**:
+   - Uses `sentence-transformers/all-MiniLM-L6-v2` (384 dimensions, ~80MB footprint).
+   - Fully offline; requires **0 cloud credentials** and **0 external API calls**.
+   - Lazy model loading ensures imports and HTTP startup remain instantaneous.
+   - Resource requirements: ~500MB RAM, operates efficiently on standard multi-core CPUs and Apple Silicon (MPS).
+
+2. **Azure OpenAI Mode (`EMBEDDING_PROVIDER=azure`)**:
+   - Optional adapter for Azure OpenAI-hosted embeddings (e.g. `text-embedding-3-small`, 1536 dimensions).
+   - Configure in `.env`:
+     ```env
+     RAGFORGE_EMBEDDING_PROVIDER=azure
+     RAGFORGE_EMBEDDING_MODEL=text-embedding-3-small
+     RAGFORGE_EMBEDDING_DIMENSION=1536
+     RAGFORGE_AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com
+     RAGFORGE_AZURE_OPENAI_API_KEY=your-api-key
+     RAGFORGE_AZURE_OPENAI_DEPLOYMENT_NAME=text-embedding-3-small
+     RAGFORGE_AZURE_OPENAI_API_VERSION=2024-02-01
+     ```
+   - **Verification**: Verify that the selected deployment is provisioned and accessible under your Azure subscription before switching. RAGForge validates settings and fails fast if credentials are missing or invalid.
+
+#### Semantic Search API (`POST /api/v1/search`)
+Query indexed documents using pgvector cosine similarity search:
+
+```bash
+curl -X POST "http://localhost:8000/api/v1/search" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "How does PostgreSQL connection pooling manage backend connections?",
+    "limit": 5
+  }'
+```
+
+Response:
+```json
+{
+  "query": "How does PostgreSQL connection pooling manage backend connections?",
+  "model_name": "all-MiniLM-L6-v2",
+  "dimension": 384,
+  "total_results": 2,
+  "items": [
+    {
+      "chunk_id": "c138d4ef-1891-4475-b6d3-bc8efdca0784",
+      "document_id": "e8632d16-b302-464b-b862-4c3f950ee131",
+      "filename": "database_architecture.txt",
+      "chunk_index": 0,
+      "content": "PostgreSQL connection pooling with PgBouncer manages backend server connections...",
+      "page_number": 1,
+      "similarity_score": 0.8124,
+      "cosine_distance": 0.1876
+    }
+  ]
+}
+```
+
+Optional document filtering:
+```json
+{
+  "query": "PostgreSQL connection pooling",
+  "limit": 5,
+  "document_id": "e8632d16-b302-464b-b862-4c3f950ee131"
+}
+```
+
+#### Recovering Missing Embeddings & Reprocessing
+If embeddings were not computed (e.g. provider downtime or transient failure), re-trigger the document pipeline using the requeue endpoint without re-uploading:
+```bash
+curl -X POST "http://localhost:8000/api/v1/documents/{document_id}/requeue"
+```
+The worker will idempotently detect existing chunks and generate missing embeddings without creating duplicate records.
+
+#### Running Retrieval Evaluation Benchmark
+Measure Recall@5, latency, and result counts against a labeled benchmark dataset:
+```bash
+uv run python scripts/evaluate_retrieval.py
+```
+
+### 4. Grounded Question Answering with Citations (Milestone 6)
+
+RAGForge features an SLM answer generation pipeline that retrieves relevant context chunks, constructs bounded evidence prompts, queries the configured language model, and validates all cited references against the actual retrieved sources.
+
+#### End-to-End Question Answering Flow
+```
+User question
+  → Validate request
+  → Retrieve candidate chunks (RetrievalService / pgvector)
+  → Quality & Abstention check (similarity threshold & evidence presence)
+  → Assemble bounded prompt with [source_N] tokens
+  → Invoke SLM (GenerationProvider: Fake or Azure OpenAI)
+  → Validate and sanitize citations
+  → Return grounded answer, citations, source attribution, and latency telemetry
+```
+
+#### Configuring Generation Providers
+Configure the model provider in `.env`:
+
+1. **Deterministic Mode (`GENERATION_PROVIDER=fake`, Default)**:
+   - For fast, offline local development and unit/integration testing.
+   - Requires **0 cloud credentials** and spends **0 cloud credits**.
+   - Generates deterministic responses referencing retrieved `[source_N]` tokens.
+
+2. **Azure OpenAI Mode (`GENERATION_PROVIDER=azure`)**:
+   - Production adapter for Azure OpenAI Chat/Completions (e.g. `gpt-4o-mini`).
+   - Configure in `.env`:
+     ```env
+     RAGFORGE_GENERATION_PROVIDER=azure
+     RAGFORGE_GENERATION_MODEL=gpt-4o-mini
+     RAGFORGE_AZURE_OPENAI_ENDPOINT=https://your-resource-name.openai.azure.com/
+     RAGFORGE_AZURE_OPENAI_API_KEY=your_azure_openai_api_key_here
+     RAGFORGE_AZURE_OPENAI_API_VERSION=2024-02-01
+     RAGFORGE_AZURE_OPENAI_CHAT_DEPLOYMENT_NAME=gpt-4o-mini
+     ```
+   - **Verification**: Ensure the deployment exists in your Azure subscription before switching. RAGForge fails fast if credentials are not configured.
+
+#### Question Answering API (`POST /api/v1/ask`)
+Ask a grounded question across all indexed documents or scope to a specific document:
+
+```bash
+curl -X POST "http://localhost:8000/api/v1/ask" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "question": "How does connection pooling reduce database overhead in PostgreSQL?",
+    "limit": 5
+  }'
+```
+
+Response with verified citations and source metadata:
+```json
+{
+  "question": "How does connection pooling reduce database overhead in PostgreSQL?",
+  "answer": "Connection pools reuse active sockets to eliminate the high overhead of establishing new TCP sessions [source_1]. PgBouncer manages backend server connections efficiently in transaction pooling mode [source_2].",
+  "abstained": false,
+  "sources": [
+    {
+      "source_id": "[source_1]",
+      "chunk_id": "c138d4ef-1891-4475-b6d3-bc8efdca0784",
+      "document_id": "e8632d16-b302-464b-b862-4c3f950ee131",
+      "filename": "db_connection_pooling.txt",
+      "chunk_index": 1,
+      "page_number": 1,
+      "content": "Connection pools reuse active sockets to eliminate the high overhead of establishing new TCP sessions.",
+      "similarity_score": 0.8124
+    }
+  ],
+  "citations": [
+    {
+      "source_id": "[source_1]",
+      "chunk_id": "c138d4ef-1891-4475-b6d3-bc8efdca0784",
+      "filename": "db_connection_pooling.txt",
+      "page_number": 1
+    }
+  ],
+  "telemetry": {
+    "provider": "fake",
+    "model_name": "gpt-4o-mini",
+    "retrieval_latency_ms": 11.74,
+    "generation_latency_ms": 4.54,
+    "retrieved_chunk_count": 3,
+    "used_chunk_count": 3,
+    "prompt_tokens": 185,
+    "completion_tokens": 42,
+    "total_tokens": 227
+  }
+}
+```
+
+#### Abstention Policies
+- **No Evidence**: If no chunks are indexed or matching the filter, the system abstains immediately without invoking the model:
+  `"The indexed documents did not provide sufficient evidence to answer the question."`
+- **Low Relevance**: If the top retrieved chunk's similarity score is below `RAGFORGE_ASK_MIN_SIMILARITY_THRESHOLD` (default 0.40), the system abstains:
+  `"The retrieved passages have insufficient relevance to reliably answer the question."`
+
+#### Running Grounded QA Benchmark Evaluation
+Run the question answering benchmark measuring grounded citation rate, abstention accuracy, and latencies:
+```bash
+uv run python scripts/evaluate_qa.py
+```
+
+### 5. Current Limitations & Milestone Boundaries (Milestone 6)
+- **No Hybrid Search / Reranking**: Retrieval relies strictly on dense vector cosine similarity; BM25 keyword fusion and cross-encoder rerankers will follow in future milestones.
+- **No Conversational Memory**: The `/api/v1/ask` endpoint is single-turn stateless question answering; multi-turn chat memory is deferred to conversational milestones.
+- **No OCR**: Image-only PDFs and scanned files require optical character recognition.
+- **No Public Authentication**: The API is private and intended for controlled development and testing environments.
+
+
 
 

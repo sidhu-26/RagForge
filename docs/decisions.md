@@ -100,3 +100,73 @@ Document parsing and chunking are compute- and memory-intensive operations. Perf
 ### Consequences
 - **Pros**: HTTP uploads return sub-second responses; worker failures cannot crash the API; idempotent job processing allows safe retries and reprocessing; clear chunk provenance.
 - **Cons**: Redis service dependency required for processing; temporary dual-write risk if queue is offline (mitigated via requeue endpoint).
+
+---
+
+## ADR-007: Embedding Generation Architecture, pgvector Storage, and Semantic Retrieval
+
+### Context
+Milestone 5 introduces semantic retrieval over persisted document chunks. We need dense vector representations generated from text, persistent indexing with nearest-neighbor search, and strict model compatibility without blocking HTTP request handlers, coupling chunk storage to vector formats, or incurring cloud costs during local development and testing.
+
+### Decisions
+1. **Dedicated `chunk_embeddings` Table**:
+   - Rather than embedding vectors directly as an array or vector column on `document_chunks`, embeddings are stored in a dedicated `chunk_embeddings` table with a foreign key to `document_chunks(id)`.
+   - **Rationale**: Keeps the chunk content as the source of truth, allows re-embedding with different models or dimensions without mutating or re-parsing original chunk text, and enforces `UniqueConstraint("chunk_id", "model_name")`.
+2. **PostgreSQL with `pgvector` Extension**:
+   - Replaced base PostgreSQL image in `docker-compose.yml` with `pgvector/pgvector:pg16`.
+   - Enabled `CREATE EXTENSION IF NOT EXISTS vector;` in an Alembic migration (`c98097ea7a6c`).
+   - Retained the existing PostgreSQL data volume without destructive resets.
+3. **Cosine Distance (`<=>`) Metric**:
+   - Selected cosine distance as the primary nearest-neighbor metric for dense text embeddings:
+     $\text{distance} = 1 - \text{cosine\_similarity}$.
+   - Normalized embedding vectors allow ranking where distance = 0.0 represents exact semantic alignment, converted to `similarity_score = round(1.0 - distance, 5)`.
+4. **Typed Provider Abstraction & Model Compatibility**:
+   - Built `EmbeddingProvider` abstract base class with:
+     - `LocalSentenceTransformerProvider` (`all-MiniLM-L6-v2`, 384 dimensions) using lazy loading and `asyncio.to_thread` for CPU/MPS inference.
+     - `AzureOpenAIEmbeddingProvider` with bounded retries, fail-fast credential validation, and no automatic cloud resource provisioning.
+     - `FakeEmbeddingProvider` for fast, deterministic unit test fixtures.
+   - Enforced strict vector dimension checks: attempts to compare vectors across mismatched model dimensions or names fail explicitly with `EmbeddingDimensionMismatchError`.
+5. **Worker Integration & Idempotency**:
+   - Extended the ARQ background worker pipeline: chunks are embedded in bounded batches (`EMBEDDING_BATCH_SIZE=32`) immediately following extraction and chunking within the same job transaction.
+   - Idempotency guarantees: existing embeddings for the target model are verified before generation, preventing duplicate rows or unnecessary model inference.
+6. **Dedicated Semantic Retrieval Service (`POST /api/v1/search`)**:
+   - Decoupled search logic into `RetrievalService` with query validation, query embedding, pgvector SQL generation, stable tie-breaking on `chunk_id`, and rich source attribution (`filename`, `chunk_index`, `page_number`).
+   - Does not perform cross-database Python vector comparisons; all distance calculations execute natively in PostgreSQL.
+
+### Consequences
+- **Pros**: Fully functional offline local embeddings with 0 cloud cost; clean separation between source text and vector representations; fast SQL nearest-neighbor search; resilient background processing.
+- **Cons**: Switching embedding models or dimensions requires running an embedding backfill across existing chunks.
+
+---
+
+## ADR-008: SLM-Powered Grounded Generation, Evidence Budgeting, and Citation Verification
+
+### Context
+Milestone 6 introduces question answering over retrieved document chunks. The system requires factual answer generation grounded strictly in retrieved passages, verifiable source citations, clear abstention policies when evidence is absent or irrelevant, and defense against prompt injection in untrusted user-uploaded documents, without cloud cost locks or blocking worker pipelines.
+
+### Decisions
+1. **Decoupled `GenerationProvider` Abstraction**:
+   - Implemented abstract base class `GenerationProvider` with `generate(system_prompt, user_prompt, temperature, max_tokens) -> GenerationOutput`.
+   - Built `FakeGenerationProvider` with deterministic test responses and source referencing.
+   - Built `AzureOpenAIGenerationProvider` targeting Azure OpenAI Chat/Completions REST endpoint with exponential backoff on HTTP 429 and fail-fast configuration validation.
+   - Zero automatic provisioning or cloud spending: Azure mode requires explicit user configuration via environment variables.
+2. **Untrusted Evidence Isolation & Context Budgeting**:
+   - Prompt construction is strictly modularized in `prompt_builder.py`.
+   - Distinct system instructions emphasize factual adherence, source attribution, and abstention instructions.
+   - Document chunks are explicitly demarcated as untrusted data (`--- [source_N] (Document: filename) ---`), and the model is commanded to ignore instructions, directives, or role-override attempts embedded inside document text.
+   - Hard limits on question length (`ASK_MAX_QUESTION_CHARS=1000`) and concatenated evidence context (`ASK_MAX_EVIDENCE_TOTAL_CHARS=12000`) prevent context window exhaustion and prompt flooding.
+3. **Application-Assigned Citation Tokens & Verification**:
+   - Rather than asking the model to invent filenames or page numbers, the application assigns stable citation tokens (`[source_1]`, `[source_2]`, etc.) to each chunk in the prompt.
+   - The citation validator (`citation_validator.py`) matches citation tokens against the active request's actual retrieved chunks. Hallucinated or nonexistent citation tokens are stripped from the response text, and only verified chunk citations are emitted.
+4. **Configurable Evidence Quality & Abstention Policy**:
+   - If retrieval yields zero chunks, the generation model is **not invoked**; the system immediately returns an abstention message (`ABSTENTION_MESSAGE_NO_EVIDENCE`).
+   - If the top candidate chunk's similarity score is below `ASK_MIN_SIMILARITY_THRESHOLD` (default 0.40), the system abstains (`ABSTENTION_MESSAGE_LOW_SIMILARITY`), preventing hallucinations on out-of-domain questions.
+5. **Request Path vs. Background Worker Separation**:
+   - Kept question answering (`POST /api/v1/ask`) within the HTTP request path using async non-blocking I/O.
+   - Did not place generation tasks inside the ARQ document worker. Document ingestion and query answer generation remain decoupled architectures.
+
+### Consequences
+- **Pros**: Clean separation between retrieval, prompt formatting, LLM invocation, and citation validation; complete immunity to cloud provider dependencies during test runs; grounded citations; protection against prompt injections in document content.
+- **Cons**: Dense retrieval similarity scores are uncalibrated heuristics; threshold selection requires empirical tuning for specific document domains.
+
+

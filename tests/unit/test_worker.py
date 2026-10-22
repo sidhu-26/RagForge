@@ -8,7 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ragforge.core.config import Settings
-from ragforge.db.models import Document, DocumentChunk, DocumentStatus
+from ragforge.db.models import ChunkEmbedding, Document, DocumentChunk, DocumentStatus
 from ragforge.db.session import get_session_factory
 from ragforge.services.storage import LocalFilesystemStorage
 from ragforge.worker import process_document
@@ -119,6 +119,17 @@ async def test_worker_successful_end_to_end(
             assert c.character_count == len(c.content)
             assert c.token_count_estimate > 0
 
+        # Verify chunk embeddings were also persisted
+        chunk_ids = [c.id for c in chunks]
+        e_stmt = select(ChunkEmbedding).where(ChunkEmbedding.chunk_id.in_(chunk_ids))
+        e_res = await session.execute(e_stmt)
+        embeddings = list(e_res.scalars().all())
+        assert len(embeddings) == len(chunks)
+        for emb in embeddings:
+            assert emb.dimension == 384
+            assert emb.model_name == worker_settings.EMBEDDING_MODEL
+            assert len(emb.embedding) == 384
+
 
 @pytest.mark.asyncio
 async def test_worker_idempotency_and_reprocessing(
@@ -190,12 +201,16 @@ async def test_worker_idempotency_and_reprocessing(
             settings=worker_settings,
         )
 
-    # Count chunks after second run: must NOT be doubled
+    # Count chunks and embeddings after second run: must NOT be doubled
     async with session_factory() as session:
         c_stmt = select(DocumentChunk).where(DocumentChunk.document_id == doc_id)
         c_res = await session.execute(c_stmt)
-        count_second = len(list(c_res.scalars().all()))
-        assert count_second == count_first
+        chunks = list(c_res.scalars().all())
+        assert len(chunks) == count_first
+
+        e_stmt = select(ChunkEmbedding).where(ChunkEmbedding.chunk_id.in_([c.id for c in chunks]))
+        e_res = await session.execute(e_stmt)
+        assert len(list(e_res.scalars().all())) == count_first
 
 
 @pytest.mark.asyncio

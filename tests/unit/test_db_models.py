@@ -48,6 +48,16 @@ def test_base_metadata_discovery() -> None:
     assert "character_count" in chunk_table.columns
     assert "token_count_estimate" in chunk_table.columns
 
+    # Verify chunk_embeddings table and columns
+    assert "chunk_embeddings" in Base.metadata.tables
+    emb_table = Base.metadata.tables["chunk_embeddings"]
+    assert "id" in emb_table.columns
+    assert emb_table.columns["id"].primary_key is True
+    assert "chunk_id" in emb_table.columns
+    assert "model_name" in emb_table.columns
+    assert "embedding" in emb_table.columns
+    assert "dimension" in emb_table.columns
+
 
 def test_document_model_instantiation() -> None:
     """Verify instantiating a Document model instance sets default status and attributes."""

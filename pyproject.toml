@@ -18,6 +18,8 @@ dependencies = [
     "pypdf>=6.21.2",
     "python-docx>=1.2.0",
     "redis>=5.3.1",
+    "pgvector>=0.3.6",
+    "sentence-transformers>=3.0.0",
 ]
 
 [project.optional-dependencies]

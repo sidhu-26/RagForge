@@ -27,6 +27,21 @@ class LogLevel(StrEnum):
     CRITICAL = "CRITICAL"
 
 
+class EmbeddingProviderType(StrEnum):
+    """Supported embedding provider backends."""
+
+    LOCAL = "local"
+    AZURE = "azure"
+    FAKE = "fake"
+
+
+class GenerationProviderType(StrEnum):
+    """Supported answer generation provider backends."""
+
+    AZURE = "azure"
+    FAKE = "fake"
+
+
 class Settings(BaseSettings):
     """Central configuration for RAGForge.
 
@@ -153,6 +168,146 @@ class Settings(BaseSettings):
         ge=1,
         le=20000,
         description="Maximum allowed chunks per document",
+    )
+
+    # Embedding Provider & Model Configuration
+    EMBEDDING_PROVIDER: EmbeddingProviderType = EmbeddingProviderType.LOCAL
+    EMBEDDING_MODEL: str = Field(
+        default="all-MiniLM-L6-v2",
+        description=(
+            "Model identifier (e.g. all-MiniLM-L6-v2 for local, text-embedding-3-small for Azure)"
+        ),
+    )
+    EMBEDDING_DIMENSION: int = Field(
+        default=384,
+        ge=1,
+        le=4096,
+        description="Expected embedding vector dimension (384 for all-MiniLM-L6-v2)",
+    )
+    EMBEDDING_BATCH_SIZE: int = Field(
+        default=32,
+        ge=1,
+        le=512,
+        description="Batch size for generating embeddings",
+    )
+    EMBEDDING_MAX_INPUT_CHARS: int = Field(
+        default=8192,
+        ge=128,
+        le=65536,
+        description="Maximum input characters allowed per text chunk for embedding",
+    )
+    EMBEDDING_REQUEST_TIMEOUT_SECONDS: float = Field(
+        default=30.0,
+        ge=1.0,
+        le=300.0,
+        description="Request timeout in seconds for remote embedding API calls",
+    )
+    EMBEDDING_MAX_RETRIES: int = Field(
+        default=3,
+        ge=0,
+        le=10,
+        description="Max retries for transient embedding provider errors",
+    )
+
+    # Azure OpenAI Embedding Configuration (Optional; required only if EMBEDDING_PROVIDER=azure)
+    AZURE_OPENAI_ENDPOINT: str | None = Field(
+        default=None,
+        description="Azure OpenAI endpoint URL (e.g. https://<res>.openai.azure.com/)",
+    )
+    AZURE_OPENAI_API_KEY: SecretStr | None = Field(
+        default=None,
+        description="Azure OpenAI API key",
+    )
+    AZURE_OPENAI_API_VERSION: str = Field(
+        default="2024-02-01",
+        description="Azure OpenAI REST API version",
+    )
+    AZURE_OPENAI_DEPLOYMENT_NAME: str | None = Field(
+        default=None,
+        description="Azure OpenAI deployment name for embeddings",
+    )
+
+    # Semantic Retrieval Configuration
+    RETRIEVAL_DEFAULT_LIMIT: int = Field(
+        default=5,
+        ge=1,
+        le=50,
+        description="Default number of ranked results returned by semantic search",
+    )
+    RETRIEVAL_MAX_LIMIT: int = Field(
+        default=50,
+        ge=1,
+        le=100,
+        description="Maximum number of ranked results allowed per query",
+    )
+
+    # Answer Generation & SLM Configuration (Milestone 6)
+    GENERATION_PROVIDER: GenerationProviderType = Field(
+        default=GenerationProviderType.FAKE,
+        description="Generation provider backend: azure | fake",
+    )
+    GENERATION_MODEL: str = Field(
+        default="gpt-4o-mini",
+        description="Model identifier (e.g. gpt-4o-mini, phi-3-mini)",
+    )
+    GENERATION_MAX_OUTPUT_TOKENS: int = Field(
+        default=1024,
+        ge=16,
+        le=4096,
+        description="Maximum tokens the model is permitted to generate",
+    )
+    GENERATION_TEMPERATURE: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=2.0,
+        description="Sampling temperature (0.0 for deterministic factual answers)",
+    )
+    GENERATION_REQUEST_TIMEOUT_SECONDS: float = Field(
+        default=45.0,
+        ge=1.0,
+        le=300.0,
+        description="Request timeout in seconds for generation API calls",
+    )
+    GENERATION_MAX_RETRIES: int = Field(
+        default=3,
+        ge=0,
+        le=10,
+        description="Max retries for transient generation errors",
+    )
+
+    # Azure OpenAI Chat/Generation Deployment
+    AZURE_OPENAI_CHAT_DEPLOYMENT_NAME: str | None = Field(
+        default=None,
+        description="Azure OpenAI deployment name for chat/completions (e.g. gpt-4o-mini)",
+    )
+
+    # Prompt & Evidence Context Bounds
+    ASK_MAX_QUESTION_CHARS: int = Field(
+        default=1000,
+        ge=1,
+        le=5000,
+        description="Maximum allowed character length for a user question",
+    )
+    ASK_DEFAULT_RETRIEVAL_LIMIT: int = Field(
+        default=5,
+        ge=1,
+        le=20,
+        description="Default number of chunks retrieved for question answering",
+    )
+    ASK_MAX_EVIDENCE_TOTAL_CHARS: int = Field(
+        default=12000,
+        ge=500,
+        le=50000,
+        description="Maximum allowed character budget for concatenated retrieved evidence context",
+    )
+    ASK_MIN_SIMILARITY_THRESHOLD: float = Field(
+        default=0.40,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Minimum cosine similarity score required for top chunk before abstaining "
+            "(0.0 means never abstain on low similarity)"
+        ),
     )
 
     @field_validator("DATABASE_URL")
