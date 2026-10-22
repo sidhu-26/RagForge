@@ -26,6 +26,15 @@ check: lint format typecheck test  ## Run all static checks and tests
 db-up:  ## Start only the PostgreSQL database container
 	docker compose up -d postgres
 
+redis-up:  ## Start only the Redis container
+	docker compose up -d redis
+
+services-up:  ## Start PostgreSQL and Redis containers
+	docker compose up -d postgres redis
+
+worker:  ## Start the ARQ background document processing worker
+	uv run arq ragforge.worker.WorkerSettings
+
 db-migrate:  ## Apply all pending Alembic database migrations
 	uv run alembic upgrade head
 

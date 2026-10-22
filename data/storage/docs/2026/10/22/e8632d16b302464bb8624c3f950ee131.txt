@@ -1,0 +1,8 @@
+# RAGForge Architecture Overview
+
+RAGForge is a portfolio-grade Retrieval-Augmented Generation pipeline.
+
+This paragraph details the asynchronous parsing and chunking architecture.
+Documents uploaded to the API are safely stored and enqueued in Redis.
+
+ARQ workers retrieve the document, run format-specific extraction, and chunk text deterministically along paragraph and sentence boundaries.

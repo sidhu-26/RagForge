@@ -1,9 +1,18 @@
-"""SQLAlchemy models for document management."""
-
+import uuid
 from enum import StrEnum
 
-from sqlalchemy import BigInteger, CheckConstraint, Index, String, Text
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy import (
+    BigInteger,
+    CheckConstraint,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
+from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from ragforge.db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
 
@@ -108,8 +117,91 @@ class Document(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         Index("ix_documents_status_created_at", "status", "created_at"),
     )
 
+    chunks: Mapped[list["DocumentChunk"]] = relationship(
+        "DocumentChunk",
+        back_populates="document",
+        cascade="all, delete-orphan",
+        order_by="DocumentChunk.chunk_index",
+        doc="Ordered text chunks associated with this document",
+    )
+
     def __repr__(self) -> str:
         return (
             f"<Document(id={self.id}, filename='{self.filename}', "
             f"status='{self.status}', size={self.file_size_bytes})>"
+        )
+
+
+class DocumentChunk(Base, UUIDPrimaryKeyMixin, TimestampMixin):
+    """Represents a discrete semantic text chunk extracted from a Document.
+
+    Chunks are strictly ordered by zero-based `chunk_index` within their parent document.
+    """
+
+    __tablename__ = "document_chunks"
+
+    # Foreign key to parent document
+    document_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("documents.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+        doc="Foreign key to the parent document record",
+    )
+
+    # Zero-based sequential ordering index
+    chunk_index: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        doc="Zero-based ordering index within the document",
+    )
+
+    # Non-empty textual content
+    content: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        doc="Extracted chunk text content",
+    )
+
+    # 1-based page number (nullable for documents like DOCX and TXT)
+    page_number: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+        doc="1-based source page number (primarily for PDFs)",
+    )
+
+    # Non-negative character count
+    character_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        doc="Total character count in this chunk",
+    )
+
+    # Approximate token count estimate (character-derived heuristic)
+    token_count_estimate: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        doc="Estimated token count (heuristic: ~4 chars per token)",
+    )
+
+    # Relationship back to document
+    document: Mapped["Document"] = relationship(
+        "Document",
+        back_populates="chunks",
+    )
+
+    __table_args__ = (
+        UniqueConstraint("document_id", "chunk_index", name="uq_document_chunks_doc_chunk_idx"),
+        CheckConstraint("chunk_index >= 0", name="ck_document_chunks_non_negative_idx"),
+        CheckConstraint("character_count > 0", name="ck_document_chunks_positive_char_count"),
+        CheckConstraint("token_count_estimate >= 0", name="ck_document_chunks_non_negative_tokens"),
+        CheckConstraint(
+            "page_number IS NULL OR page_number > 0", name="ck_document_chunks_positive_page"
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<DocumentChunk(id={self.id}, document_id={self.document_id}, "
+            f"index={self.chunk_index}, chars={self.character_count})>"
         )

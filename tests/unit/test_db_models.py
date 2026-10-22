@@ -36,6 +36,18 @@ def test_base_metadata_discovery() -> None:
     assert "created_at" in table.columns
     assert "updated_at" in table.columns
 
+    # Verify document_chunks table and columns
+    assert "document_chunks" in Base.metadata.tables
+    chunk_table = Base.metadata.tables["document_chunks"]
+    assert "id" in chunk_table.columns
+    assert chunk_table.columns["id"].primary_key is True
+    assert "document_id" in chunk_table.columns
+    assert "chunk_index" in chunk_table.columns
+    assert "content" in chunk_table.columns
+    assert "page_number" in chunk_table.columns
+    assert "character_count" in chunk_table.columns
+    assert "token_count_estimate" in chunk_table.columns
+
 
 def test_document_model_instantiation() -> None:
     """Verify instantiating a Document model instance sets default status and attributes."""

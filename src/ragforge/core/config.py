@@ -100,6 +100,61 @@ class Settings(BaseSettings):
         description="Chunk size for streaming uploads to disk and hashing (default 64 KB)",
     )
 
+    # Redis and ARQ Queue Configuration
+    REDIS_URL: SecretStr = SecretStr("redis://localhost:6379/0")
+    QUEUE_JOB_TIMEOUT_SECONDS: int = Field(
+        default=300,
+        ge=10,
+        le=3600,
+        description="Maximum execution timeout for worker jobs in seconds",
+    )
+    WORKER_MAX_TRIES: int = Field(
+        default=3,
+        ge=1,
+        le=10,
+        description="Maximum retry attempts for worker jobs",
+    )
+
+    # Text Extraction Limits
+    EXTRACTION_MAX_PAGES: int = Field(
+        default=500,
+        ge=1,
+        le=5000,
+        description="Maximum allowed pages in a document (e.g. PDF)",
+    )
+    EXTRACTION_MAX_TEXT_SIZE_BYTES: int = Field(
+        default=10 * 1024 * 1024,  # 10 MB text
+        ge=1024,
+        le=100 * 1024 * 1024,
+        description="Maximum extracted plain text size in bytes",
+    )
+
+    # Chunking Configuration
+    CHUNK_TARGET_SIZE: int = Field(
+        default=1000,
+        ge=50,
+        le=10000,
+        description="Target chunk size in characters",
+    )
+    CHUNK_OVERLAP: int = Field(
+        default=150,
+        ge=0,
+        le=2000,
+        description="Overlap between adjacent chunks in characters",
+    )
+    CHUNK_MIN_SIZE: int = Field(
+        default=50,
+        ge=10,
+        le=500,
+        description="Minimum useful chunk size in characters",
+    )
+    MAX_CHUNKS_PER_DOCUMENT: int = Field(
+        default=2000,
+        ge=1,
+        le=20000,
+        description="Maximum allowed chunks per document",
+    )
+
     @field_validator("DATABASE_URL")
     @classmethod
     def validate_database_url(cls, v: SecretStr) -> SecretStr:

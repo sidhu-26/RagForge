@@ -22,10 +22,10 @@ def test_alembic_metadata_discovery() -> None:
     config = Config("alembic.ini")
     script_dir = ScriptDirectory.from_config(config)
 
-    # Verify head revision is present and points to our documents migration
+    # Verify head revision is present and points to our document chunks migration
     heads = script_dir.get_heads()
     assert len(heads) == 1
-    assert heads[0] == "724603fa9a4f"
+    assert heads[0] == "fcfd4ac75270"
 
     # Verify target metadata is bound to Base.metadata
     assert Base.metadata is not None

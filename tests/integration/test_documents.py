@@ -112,7 +112,7 @@ async def test_upload_valid_pdf(async_client: AsyncClient, test_storage: Storage
     assert data["mime_type"] == "application/pdf"
     assert data["file_size_bytes"] == len(pdf_content)
     assert data["sha256_checksum"] == expected_hash
-    assert data["status"] == "uploaded"
+    assert data["status"] in ("uploaded", "queued")
     assert "storage_key" in data
     # Ensure raw filesystem paths are NEVER exposed to client
     assert "/test_storage" not in data["storage_key"]
@@ -330,3 +330,35 @@ async def test_storage_failure_during_upload_returns_500(async_client: AsyncClie
     response = await async_client.post("/api/v1/documents", files=files)
     assert response.status_code == 500
     assert "Failed to store document" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_get_document_chunks_pagination_and_not_found(
+    async_client: AsyncClient,
+) -> None:
+    """Test chunk retrieval endpoint pagination, ordering, and 404 on nonexistent doc."""
+    # 1. 404 when document does not exist
+    non_existent = uuid.uuid4()
+    resp = await async_client.get(f"/api/v1/documents/{non_existent}/chunks")
+    assert resp.status_code == 404
+
+    # 2. Upload a text document
+    txt_content = b"Paragraph 1 text.\n\nParagraph 2 text.\n\nParagraph 3 text."
+    files = {"file": ("chunks_test.txt", txt_content, "text/plain")}
+    up_resp = await async_client.post("/api/v1/documents", files=files)
+    assert up_resp.status_code == 201
+    doc_id = up_resp.json()["id"]
+
+    # Retrieve chunks before processing (empty list, document status indicates state)
+    chunk_resp = await async_client.get(f"/api/v1/documents/{doc_id}/chunks")
+    assert chunk_resp.status_code == 200
+    chunk_data = chunk_resp.json()
+    assert chunk_data["document_id"] == doc_id
+    assert chunk_data["total"] == 0
+    assert chunk_data["items"] == []
+
+    # 3. Simulate requeue endpoint
+    requeue_resp = await async_client.post(f"/api/v1/documents/{doc_id}/requeue")
+    assert requeue_resp.status_code in (202, 503)  # 202 if Redis up, 503 if down
+    if requeue_resp.status_code == 202:
+        assert requeue_resp.json()["status"] == "queued"

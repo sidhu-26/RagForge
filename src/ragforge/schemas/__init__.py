@@ -1,5 +1,6 @@
 """Pydantic schemas for RAGForge."""
 
+from ragforge.schemas.chunk import DocumentChunkListResponse, DocumentChunkResponse
 from ragforge.schemas.document import (
     DocumentDeleteResponse,
     DocumentListResponse,
@@ -9,6 +10,8 @@ from ragforge.schemas.health import DependencyStatus, LivenessResponse, Readines
 
 __all__ = [
     "DependencyStatus",
+    "DocumentChunkListResponse",
+    "DocumentChunkResponse",
     "DocumentDeleteResponse",
     "DocumentListResponse",
     "DocumentResponse",

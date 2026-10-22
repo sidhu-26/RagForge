@@ -14,8 +14,10 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ragforge.core.config import Settings
-from ragforge.db.models import Document, DocumentStatus
+from ragforge.db.models import Document, DocumentChunk, DocumentStatus
+from ragforge.schemas.chunk import DocumentChunkListResponse, DocumentChunkResponse
 from ragforge.schemas.document import DocumentListResponse, DocumentResponse
+from ragforge.services.queue import QueueError, QueueService
 from ragforge.services.storage import StorageEngine, StorageError
 
 logger = logging.getLogger(__name__)
@@ -146,15 +148,26 @@ def inspect_file_content(head_bytes: bytes, filename: str) -> str:
 class DocumentService:
     """Service layer encapsulating document business logic, validation, and storage coordination."""
 
-    def __init__(self, db: AsyncSession, storage: StorageEngine, settings: Settings) -> None:
+    def __init__(
+        self,
+        db: AsyncSession,
+        storage: StorageEngine,
+        settings: Settings,
+        queue: QueueService | None = None,
+    ) -> None:
         self.db = db
         self.storage = storage
         self.settings = settings
+        self.queue = queue
 
-    async def upload_document(self, upload_file: UploadFile) -> DocumentResponse:
+    async def upload_document(
+        self,
+        upload_file: UploadFile,
+        auto_enqueue: bool = True,
+    ) -> DocumentResponse:
         """Stream upload file in chunks, validate signatures, compute SHA-256, write to storage,
-
         and persist metadata in PostgreSQL. Cleans up stored file if database transaction fails.
+        If auto_enqueue is True and queue is configured, enqueues background processing job.
         """
         raw_filename = upload_file.filename
         safe_filename = sanitize_filename(raw_filename)
@@ -252,7 +265,7 @@ class DocumentService:
         # Compute checksum hex digest
         checksum = sha256.hexdigest()
 
-        # Create SQLAlchemy Document entity
+        # Create SQLAlchemy Document entity with initial UPLOADED status
         document = Document(
             id=doc_id,
             filename=safe_filename,
@@ -294,7 +307,104 @@ class DocumentService:
                 "storage_key": document.storage_key,
             },
         )
+
+        # Enqueue background processing job if requested
+        if auto_enqueue and self.queue is not None:
+            try:
+                await self.queue.enqueue_document_processing(document.id)
+                document.status = DocumentStatus.QUEUED.value
+                await self.db.commit()
+                await self.db.refresh(document)
+            except Exception as e:
+                # Dual-write consideration: Redis enqueue failed, but document was saved.
+                # Leave document in 'uploaded' status so it can be retried/requeued later.
+                # DO NOT delete the uploaded file or document!
+                logger.warning(
+                    "Document was uploaded but failed to enqueue background job. "
+                    "Status remains UPLOADED.",
+                    extra={"document_id": str(document.id), "error": str(e)},
+                )
+
         return DocumentResponse.model_validate(document)
+
+    async def enqueue_document(self, document_id: uuid.UUID) -> DocumentResponse:
+        """Enqueue an uploaded or failed document for background processing."""
+        stmt = select(Document).where(Document.id == document_id)
+        result = await self.db.execute(stmt)
+        doc = result.scalar_one_or_none()
+        if doc is None:
+            raise DocumentNotFoundError(document_id)
+
+        if doc.status == DocumentStatus.PROCESSING.value:
+            raise DocumentValidationError("Document is currently being processed.", status_code=409)
+
+        if self.queue is None:
+            raise DocumentValidationError("Background job queue is not available.", status_code=503)
+
+        try:
+            await self.queue.enqueue_document_processing(doc.id)
+            doc.status = DocumentStatus.QUEUED.value
+            doc.error_code = None
+            doc.error_message = None
+            await self.db.commit()
+            await self.db.refresh(doc)
+            return DocumentResponse.model_validate(doc)
+        except QueueError as exc:
+            raise DocumentValidationError(
+                f"Failed to enqueue document job: {exc}", status_code=503
+            ) from exc
+
+    async def get_document_chunks(
+        self,
+        document_id: uuid.UUID,
+        page: int = 1,
+        page_size: int = 20,
+    ) -> DocumentChunkListResponse:
+        """Retrieve paginated persisted chunks for a document ordered by chunk_index."""
+        stmt = select(Document).where(Document.id == document_id)
+        result = await self.db.execute(stmt)
+        doc = result.scalar_one_or_none()
+        if doc is None:
+            raise DocumentNotFoundError(document_id)
+
+        if page < 1:
+            page = 1
+        if page_size < 1 or page_size > 100:
+            page_size = 20
+
+        # Query total chunk count
+        count_stmt = (
+            select(func.count())
+            .select_from(DocumentChunk)
+            .where(DocumentChunk.document_id == document_id)
+        )
+        count_res = await self.db.execute(count_stmt)
+        total = count_res.scalar_one()
+
+        # Query paginated chunk records
+        offset = (page - 1) * page_size
+        chunk_stmt = (
+            select(DocumentChunk)
+            .where(DocumentChunk.document_id == document_id)
+            .order_by(DocumentChunk.chunk_index.asc())
+            .offset(offset)
+            .limit(page_size)
+        )
+        chunk_res = await self.db.execute(chunk_stmt)
+        chunk_rows = list(chunk_res.scalars().all())
+
+        total_pages = (total + page_size - 1) // page_size if total > 0 else 0
+        items = [DocumentChunkResponse.model_validate(c) for c in chunk_rows]
+
+        return DocumentChunkListResponse(
+            document_id=doc.id,
+            status=doc.status,
+            items=items,
+            total=total,
+            page=page,
+            page_size=page_size,
+            total_pages=total_pages,
+        )
 
     async def get_document(self, document_id: uuid.UUID) -> DocumentResponse:
         """Fetch document metadata by UUID."""
@@ -344,7 +454,7 @@ class DocumentService:
 
         storage_key = doc.storage_key
 
-        # Delete from database first in transaction
+        # Delete from database first in transaction (cascades to document_chunks)
         await self.db.delete(doc)
         await self.db.commit()
 

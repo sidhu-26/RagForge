@@ -71,3 +71,32 @@ Web security demands defense-in-depth: preventing cross-origin request forgery (
 ### Consequences
 - **Pros**: High baseline security posture meeting enterprise compliance standards.
 - **Cons**: Developers connecting local frontends must explicitly define `RAGFORGE_CORS_ORIGINS=["http://localhost:3000"]` in their `.env`.
+
+---
+
+## ADR-006: Asynchronous Document Processing Pipeline & Deterministic Chunking
+
+### Context
+Document parsing and chunking are compute- and memory-intensive operations. Performing PDF parsing, text extraction, and semantic chunking inside the synchronous HTTP upload request introduces latency spikes, risks request timeouts, and starves the ASGI server event loop. Furthermore, retrieval systems require deterministic chunk boundaries, accurate source attribution, and atomic state handling.
+
+### Decisions
+1. **Asynchronous Background Processing with ARQ and Redis**:
+   - The HTTP upload route strictly validates file signatures, streams payloads to secure storage, registers initial metadata in PostgreSQL, and enqueues a background job via Redis.
+   - Heavy parsing (pypdf, python-docx, text decoding) and chunking occur in a dedicated ARQ background worker process.
+2. **Standalone Deterministic Chunking Service**:
+   - Implemented `TextChunker` as a standalone, deterministic service decoupled from FastAPI and SQLAlchemy.
+   - Employs natural semantic split boundaries: paragraphs first (`\n\n`), then sentences (`. `, `? `, `! `), then words.
+   - For PDFs, chunking preserves page boundaries so each chunk retains accurate source page numbers.
+3. **Dual-Write Trade-Off**:
+   - Committing document metadata in PostgreSQL and enqueuing jobs in Redis are distinct network operations without distributed 2PC (two-phase commit).
+   - If Redis is temporarily unreachable after a database commit, the document remains safely in the `uploaded` state (rather than failing the upload or deleting stored files).
+   - A dedicated `POST /api/v1/documents/{document_id}/requeue` endpoint allows manual or automated retries without re-uploading file bytes. A full transactional outbox pattern was deferred as an unnecessary complexity for this prototype milestone.
+4. **Character-Based Chunking Heuristic**:
+   - Chunk targets and overlaps are defined in characters (~1,000 target, ~150 overlap). Character counting is model-agnostic, deterministic, and avoids coupling document ingestion to a specific tokenizer before the embedding model is chosen in later milestones.
+   - Estimated token counts (`(len + 3) // 4`) are tracked and clearly documented as heuristic estimates.
+5. **Rich Chunk Metadata for Downstream Retrieval & Citations**:
+   - Chunks persist zero-based sequential `chunk_index`, source `page_number`, `character_count`, and approximate tokens to power precise citation attribution and context assembly in later retrieval milestones.
+
+### Consequences
+- **Pros**: HTTP uploads return sub-second responses; worker failures cannot crash the API; idempotent job processing allows safe retries and reprocessing; clear chunk provenance.
+- **Cons**: Redis service dependency required for processing; temporary dual-write risk if queue is offline (mitigated via requeue endpoint).

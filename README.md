@@ -215,3 +215,137 @@ curl -X DELETE "http://localhost:8000/api/v1/documents/123e4567-e89b-12d3-a456-4
   -H "Accept: application/json"
 ```
 
+---
+
+## Asynchronous Document Parsing, Chunking & Worker Pipeline (Milestone 4)
+
+In Milestone 4, RAGForge integrates an asynchronous text processing pipeline powered by **Redis** and **ARQ**, featuring deterministic sentence/paragraph chunking and persistent chunks schema in PostgreSQL.
+
+```mermaid
+flowchart TD
+    Client[Client / Web UI] -->|1. POST /api/v1/documents| API[FastAPI API Server]
+    API -->|2. Stream Payload| Disk[Secure Storage data/storage]
+    API -->|3. Register Metadata| DB[(PostgreSQL documents)]
+    API -->|4. Enqueue Job| Redis[(Redis Queue)]
+    API -->|5. Return 201 'queued'| Client
+    
+    Worker[ARQ Background Worker] -->|6. Pop Job| Redis
+    Worker -->|7. Mark 'processing'| DB
+    Worker -->|8. Read File Bytes| Disk
+    Worker -->|9. Extract Text: PDF / DOCX / TXT| Extractor[DocumentExtractor]
+    Worker -->|10. Semantic Chunking| Chunker[TextChunker]
+    Worker -->|11. Persist Chunks & Mark 'processed'| DB
+    
+    Client -->|12. GET /api/v1/documents/{id}/chunks| API
+    API -->|13. Read Paginated Chunks| DB
+```
+
+### 1. Starting PostgreSQL, Redis, API, and Worker
+
+Start the components across separate terminal windows during local development:
+
+```bash
+# Terminal 1: Start PostgreSQL and Redis containers
+make services-up
+# or: docker compose up -d postgres redis
+
+# Terminal 2: Run Alembic migrations
+make db-migrate
+# or: uv run alembic upgrade head
+
+# Terminal 3: Start the FastAPI API server
+make dev
+# or: uv run uvicorn ragforge.main:app --reload --host 0.0.0.0 --port 8000
+
+# Terminal 4: Start the ARQ background worker
+make worker
+# or: uv run arq ragforge.worker.WorkerSettings
+```
+
+### 2. Upload, Requeue, and Chunk API Usage
+
+#### Upload Document (PDF, DOCX, or TXT)
+```bash
+# Upload a PDF
+curl -X POST "http://localhost:8000/api/v1/documents" \
+  -F "file=@sample_report.pdf"
+
+# Response immediately returns HTTP 201 with status="queued":
+# {
+#   "id": "e8632d16-b302-464b-b862-4c3f950ee131",
+#   "filename": "sample_report.pdf",
+#   "status": "queued",
+#   ...
+# }
+```
+
+#### Check Document Status
+```bash
+curl -X GET "http://localhost:8000/api/v1/documents/e8632d16-b302-464b-b862-4c3f950ee131"
+# When worker finishes, status transitions to "processed":
+# {
+#   "id": "e8632d16-b302-464b-b862-4c3f950ee131",
+#   "status": "processed",
+#   "error_code": null,
+#   ...
+# }
+```
+
+#### Retrieve Persisted Chunks
+```bash
+curl -X GET "http://localhost:8000/api/v1/documents/e8632d16-b302-464b-b862-4c3f950ee131/chunks?page=1&page_size=20"
+# Response:
+# {
+#   "document_id": "e8632d16-b302-464b-b862-4c3f950ee131",
+#   "status": "processed",
+#   "items": [
+#     {
+#       "id": "b53e8787-8d05-4c07-b3c9-04a4f8ad2b99",
+#       "document_id": "e8632d16-b302-464b-b862-4c3f950ee131",
+#       "chunk_index": 0,
+#       "content": "First chunk text...",
+#       "page_number": 1,
+#       "character_count": 950,
+#       "token_count_estimate": 238,
+#       "created_at": "2026-10-22T12:00:00Z"
+#     }
+#   ],
+#   "total": 12,
+#   "page": 1,
+#   "page_size": 20,
+#   "total_pages": 1
+# }
+```
+
+#### Requeue a Document
+If Redis was unavailable during upload or if an earlier run failed:
+```bash
+curl -X POST "http://localhost:8000/api/v1/documents/e8632d16-b302-464b-b862-4c3f950ee131/requeue"
+# HTTP 202 Accepted: transitions status back to "queued"
+```
+
+### 3. Troubleshooting Queue & Processing Failures
+
+1. **Redis unreachable (`status: uploaded` after upload)**:
+   - Check if Redis container is active: `docker compose ps`
+   - Start Redis: `make redis-up`
+   - Trigger processing without re-uploading: `POST /api/v1/documents/{id}/requeue`
+2. **Document status is `failed`**:
+   - Inspect `error_code` and `error_message` on the document record (`GET /api/v1/documents/{id}`).
+   - Common codes:
+     - `DOCUMENT_EMPTY`: Document contained no text (e.g. image-only PDF or empty file).
+     - `MALFORMED_DOCUMENT`: Corrupted zip structure in DOCX, unreadable PDF stream, or non-UTF-8 text.
+     - `BOUNDS_EXCEEDED`: Exceeded `EXTRACTION_MAX_PAGES` (500) or `EXTRACTION_MAX_TEXT_SIZE_BYTES` (10 MB).
+3. **Worker not picking up jobs**:
+   - Verify worker is running: `make worker`
+   - Verify Redis connection string in `.env` matches `RAGFORGE_REDIS_URL`.
+
+### 4. Current Limitations & Milestone Boundaries
+- **No OCR**: Scanned documents and image-only PDFs will fail with `DOCUMENT_EMPTY`.
+- **No Embeddings**: Vector representations are not yet computed.
+- **No Vector Search**: Storage and retrieval are relational via PostgreSQL and local disk.
+- **No SLM / LLM Integration**: Generative responses are not yet invoked.
+- **No Public Authentication**: The API is private and intended for local development.
+- **No Antivirus Scanner**: File inspection relies on MIME/signature checks without live malware engine scanning.
+
+
