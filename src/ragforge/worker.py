@@ -88,15 +88,21 @@ async def process_document(
         )
         return
 
-    # Check eligibility
-    # If already processed and embeddings exist, exit cleanly (idempotent no-op)
-    # If chunks exist but embeddings are missing, allow backfill/recovery
+    provider = embedding_provider or create_embedding_provider(settings)
+
+    # Check eligibility: if already processed and embeddings exist for current
+    # provider and model, exit cleanly (idempotent no-op).
+    # If chunks exist but embeddings are missing or incompatible, allow backfill/recovery.
     if document.status == DocumentStatus.PROCESSED.value:
-        # Check if chunks have embeddings
+        # Check if chunks have embeddings for current provider and model
         emb_check = await db.execute(
             select(ChunkEmbedding)
             .join(DocumentChunk, ChunkEmbedding.chunk_id == DocumentChunk.id)
-            .where(DocumentChunk.document_id == doc_uuid)
+            .where(
+                DocumentChunk.document_id == doc_uuid,
+                ChunkEmbedding.provider == provider.provider_name,
+                ChunkEmbedding.model_name == provider.model_name,
+            )
             .limit(1)
         )
         if emb_check.scalar_one_or_none() is not None:
@@ -145,7 +151,6 @@ async def process_document(
         chunks = chunker.chunk_document(extracted_pages)
 
         # 6. Generate embeddings for chunks in bounded batches
-        provider = embedding_provider or create_embedding_provider(settings)
         chunk_contents = [c.content for c in chunks]
         batch_size = settings.EMBEDDING_BATCH_SIZE
         all_embeddings: list[list[float]] = []

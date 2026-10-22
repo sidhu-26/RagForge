@@ -11,7 +11,7 @@ from ragforge.core.config import EnvironmentType, LogLevel, Settings
 
 def test_default_settings() -> None:
     """Verify that default settings instantiate with expected values."""
-    settings = Settings()
+    settings = Settings(_env_file=None)
     assert settings.PROJECT_NAME == "RAGForge API"
     assert settings.VERSION == "0.1.0"
     assert settings.ENVIRONMENT == EnvironmentType.DEVELOPMENT

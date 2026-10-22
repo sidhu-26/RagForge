@@ -91,7 +91,10 @@ class RetrievalService:
             )
             .join(ChunkEmbedding, ChunkEmbedding.chunk_id == DocumentChunk.id)
             .join(Document, Document.id == DocumentChunk.document_id)
-            .where(ChunkEmbedding.model_name == self.provider.model_name)
+            .where(
+                ChunkEmbedding.provider == self.provider.provider_name,
+                ChunkEmbedding.model_name == self.provider.model_name,
+            )
         )
 
         if document_id is not None:
@@ -124,6 +127,7 @@ class RetrievalService:
         logger.info(
             "Semantic search executed",
             extra={
+                "provider": self.provider.provider_name,
                 "model": self.provider.model_name,
                 "results_count": len(items),
                 "filtered_doc_id": str(document_id) if document_id else None,
