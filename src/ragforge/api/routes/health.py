@@ -3,9 +3,12 @@
 import logging
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, Response, status
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from ragforge.core.config import Settings, get_settings
+from ragforge.db.session import get_db
 from ragforge.schemas.health import DependencyStatus, LivenessResponse, ReadinessResponse
 
 logger = logging.getLogger(__name__)
@@ -39,32 +42,49 @@ async def get_liveness() -> LivenessResponse:
     "/ready",
     response_model=ReadinessResponse,
     status_code=status.HTTP_200_OK,
+    responses={
+        status.HTTP_503_SERVICE_UNAVAILABLE: {
+            "model": ReadinessResponse,
+            "description": "Database or critical dependency is down.",
+        }
+    },
     summary="Application readiness check",
     description=(
-        "Returns HTTP 200 when the service is ready to accept external user traffic. "
-        "In Milestone 1, database connectivity verification is not yet active, so it is "
-        "transparently marked as not_configured rather than falsely reported as available."
+        "Returns HTTP 200 when all core dependencies (e.g. PostgreSQL) are reachable and healthy. "
+        "Returns HTTP 503 if any required dependency fails connectivity check."
     ),
 )
 async def get_readiness(
+    response: Response,
+    db: AsyncSession = Depends(get_db),
     settings: Settings = Depends(get_settings),
 ) -> ReadinessResponse:
     """Readiness probe for load balancers and orchestrators.
 
-    Checks application subsystem dependencies.
-    Per Milestone 1 constraints, database connectivity checks are not falsely asserted
-    before database connectivity integration is implemented.
+    Executes a lightweight SELECT 1 check against PostgreSQL via the injected AsyncSession.
+    Guarantees credentials or raw connection errors are not exposed in client responses.
     """
-    dependencies: dict[str, DependencyStatus] = {
-        "database": DependencyStatus(
-            status="not_configured",
-            details="Database connectivity health check pending Milestone 2 integration",
-        )
-    }
+    dependencies: dict[str, DependencyStatus] = {}
+    is_ready = True
 
-    # If any required dependency is 'down', status would be 'not_ready'.
-    # Currently all active dependencies are ready.
-    overall_status = "ready"
+    try:
+        await db.execute(text("SELECT 1"))
+        dependencies["database"] = DependencyStatus(
+            status="up",
+            details="Database connection healthy",
+        )
+    except Exception:
+        # Log internal diagnostic details securely server-side without leaking in response
+        logger.warning("Database readiness probe failed: unable to execute SELECT 1", exc_info=True)
+        is_ready = False
+        dependencies["database"] = DependencyStatus(
+            status="down",
+            details="Database connectivity unavailable",
+        )
+
+    overall_status = "ready" if is_ready else "not_ready"
+    if not is_ready:
+        response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
 
     return ReadinessResponse(
         status=overall_status,

@@ -36,6 +36,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         yield
     finally:
         logger.info("Shutting down RAGForge backend")
+        from ragforge.db.session import close_db_engine
+
+        await close_db_engine()
 
 
 def create_application() -> FastAPI:

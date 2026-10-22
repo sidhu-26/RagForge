@@ -30,9 +30,7 @@ class JSONFormatter(logging.Formatter):
             # Filter out sensitive keys if any
             sensitive_keys = {"authorization", "secret", "password", "token", "api_key"}
             clean_extra = {
-                k: v
-                for k, v in record_extra.items()
-                if str(k).lower() not in sensitive_keys
+                k: v for k, v in record_extra.items() if str(k).lower() not in sensitive_keys
             }
             log_obj["context"] = clean_extra
 

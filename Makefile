@@ -1,29 +1,39 @@
-.PHONY: help install dev test lint format typecheck check docker-build docker-up docker-down
+.PHONY: help install dev test lint format typecheck check docker-build docker-up docker-down db-up db-migrate db-revision db-downgrade
 
 help:  ## Show this help menu
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-18s\033[0m %s\n", $$1, $$2}'
 
 install:  ## Install dependencies into virtual environment
-	uv venv --python 3.12
-	uv pip install -e ".[dev]"
-	uv lock
+	uv sync --all-extras
 
 dev:  ## Run local development server with auto-reload
-	.venv/bin/uvicorn ragforge.main:app --reload --host 0.0.0.0 --port 8000
+	uv run uvicorn ragforge.main:app --reload --host 0.0.0.0 --port 8000
 
 test:  ## Run pytest test suite
-	.venv/bin/pytest -v
+	uv run pytest -v
 
 lint:  ## Run ruff linter
-	.venv/bin/ruff check .
+	uv run ruff check .
 
 format:  ## Format code with ruff
-	.venv/bin/ruff format .
+	uv run ruff format .
 
 typecheck:  ## Run static type checking with mypy
-	.venv/bin/mypy src tests
+	uv run mypy src tests
 
-check: lint typecheck test  ## Run all static checks and tests
+check: lint format typecheck test  ## Run all static checks and tests
+
+db-up:  ## Start only the PostgreSQL database container
+	docker compose up -d postgres
+
+db-migrate:  ## Apply all pending Alembic database migrations
+	uv run alembic upgrade head
+
+db-revision:  ## Autogenerate a new Alembic migration revision from models (e.g. make db-revision m="add_tables")
+	uv run alembic revision --autogenerate -m "$(or $(m),schema_update)"
+
+db-downgrade:  ## Rollback the last applied migration
+	uv run alembic downgrade -1
 
 docker-build:  ## Build production Docker image
 	docker build -t ragforge:latest .

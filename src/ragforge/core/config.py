@@ -4,7 +4,7 @@ from enum import StrEnum
 from functools import lru_cache
 from typing import Annotated
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -61,10 +61,37 @@ class Settings(BaseSettings):
     CORS_ORIGINS: list[str] = Field(default_factory=list)
     SECRET_KEY: SecretStr = SecretStr("insecure_dev_secret_key_needs_override_in_production")
 
-    # Database connection (PostgreSQL async engine)
+    # Database connection & pooling (PostgreSQL async engine via asyncpg)
     DATABASE_URL: SecretStr = SecretStr(
         "postgresql+asyncpg://ragforge_user:ragforge_password@localhost:5432/ragforge_db"
     )
+    DB_POOL_SIZE: int = Field(default=5, ge=1, le=100, description="Connection pool size")
+    DB_MAX_OVERFLOW: int = Field(
+        default=10, ge=0, le=100, description="Max overflow connections beyond pool size"
+    )
+    DB_POOL_TIMEOUT: float = Field(
+        default=30.0, ge=1.0, description="Seconds to wait before timing out acquiring connection"
+    )
+    DB_POOL_RECYCLE: int = Field(
+        default=1800, ge=-1, description="Seconds before recycling connection (-1 for no recycle)"
+    )
+    DB_POOL_PRE_PING: bool = Field(
+        default=True, description="Enable connection health-checks before checkout (SELECT 1 ping)"
+    )
+    DB_ECHO: bool = Field(
+        default=False, description="Log all executed SQL statements (disabled by default)"
+    )
+
+    @field_validator("DATABASE_URL")
+    @classmethod
+    def validate_database_url(cls, v: SecretStr) -> SecretStr:
+        """Validate that the database connection string uses asyncpg driver."""
+        url_str = v.get_secret_value()
+        if not url_str.startswith("postgresql+asyncpg://"):
+            raise ValueError(
+                "DATABASE_URL must start with 'postgresql+asyncpg://' for async PostgreSQL support"
+            )
+        return v
 
     @property
     def is_production(self) -> bool:

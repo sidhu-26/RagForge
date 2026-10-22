@@ -1,11 +1,14 @@
 """Integration tests for application endpoints."""
 
 from collections.abc import AsyncGenerator
+from unittest.mock import AsyncMock
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from ragforge.core.config import Settings, get_settings
+from ragforge.db.session import get_db
 from ragforge.main import app
 
 
@@ -52,16 +55,55 @@ async def test_health_live_endpoint(async_client: AsyncClient) -> None:
 
 
 @pytest.mark.asyncio
-async def test_health_ready_endpoint(async_client: AsyncClient) -> None:
-    """Test GET /api/v1/health/ready accurately reflects current dependency status."""
+async def test_health_ready_endpoint_healthy(async_client: AsyncClient) -> None:
+    """Test GET /api/v1/health/ready returns 200 when database connectivity check succeeds."""
+    mock_db = AsyncMock(spec=AsyncSession)
+    mock_db.execute.return_value = None
+    app.dependency_overrides[get_db] = lambda: mock_db
+
     response = await async_client.get("/api/v1/health/ready")
     assert response.status_code == 200
     data = response.json()
     assert data["status"] == "ready"
     assert "timestamp" in data
     assert "dependencies" in data
-    # Verify database is explicitly marked not_configured (no fake ready check)
-    assert data["dependencies"]["database"]["status"] == "not_configured"
+    assert data["dependencies"]["database"]["status"] == "up"
+    assert "healthy" in data["dependencies"]["database"]["details"].lower()
+    mock_db.execute.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_health_ready_endpoint_database_down(async_client: AsyncClient) -> None:
+    """Test GET /api/v1/health/ready returns 503 when database query fails."""
+    mock_db = AsyncMock(spec=AsyncSession)
+    mock_db.execute.side_effect = ConnectionRefusedError("Could not connect to PostgreSQL server")
+    app.dependency_overrides[get_db] = lambda: mock_db
+
+    response = await async_client.get("/api/v1/health/ready")
+    assert response.status_code == 503
+    data = response.json()
+    assert data["status"] == "not_ready"
+    assert "timestamp" in data
+    assert "dependencies" in data
+    assert data["dependencies"]["database"]["status"] == "down"
+    # Ensure sensitive connection details, credentials or hostnames are not leaked
+    assert "Could not connect" not in data["dependencies"]["database"]["details"]
+    assert "password" not in response.text
+
+
+@pytest.mark.asyncio
+async def test_health_liveness_remains_healthy_when_database_down(
+    async_client: AsyncClient,
+) -> None:
+    """Verify GET /api/v1/health/live stays healthy even if database dependency is down."""
+    mock_db = AsyncMock(spec=AsyncSession)
+    mock_db.execute.side_effect = ConnectionRefusedError("Database unreachable")
+    app.dependency_overrides[get_db] = lambda: mock_db
+
+    response = await async_client.get("/api/v1/health/live")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "alive"
 
 
 @pytest.mark.asyncio
