@@ -40,6 +40,7 @@ class GenerationProviderType(StrEnum):
 
     AZURE = "azure"
     FAKE = "fake"
+    GEMINI = "gemini"
 
 
 class Settings(BaseSettings):
@@ -244,11 +245,11 @@ class Settings(BaseSettings):
     # Answer Generation & SLM Configuration (Milestone 6)
     GENERATION_PROVIDER: GenerationProviderType = Field(
         default=GenerationProviderType.FAKE,
-        description="Generation provider backend: azure | fake",
+        description="Generation provider backend: azure | fake | gemini",
     )
     GENERATION_MODEL: str = Field(
         default="gpt-4o-mini",
-        description="Model identifier (e.g. gpt-4o-mini, phi-3-mini)",
+        description="Model identifier (e.g. gpt-4o-mini, phi-3-mini, gemini-2.5-flash)",
     )
     GENERATION_MAX_OUTPUT_TOKENS: int = Field(
         default=1024,
@@ -279,6 +280,16 @@ class Settings(BaseSettings):
     AZURE_OPENAI_CHAT_DEPLOYMENT_NAME: str | None = Field(
         default=None,
         description="Azure OpenAI deployment name for chat/completions (e.g. gpt-4o-mini)",
+    )
+
+    # Google Gemini Generation Configuration (Required only if GENERATION_PROVIDER=gemini)
+    GEMINI_API_KEY: SecretStr | None = Field(
+        default=None,
+        description="Google Gemini API key for the Developer API",
+    )
+    GEMINI_MODEL: str = Field(
+        default="gemini-2.5-flash",
+        description="Google Gemini model identifier (e.g. gemini-2.5-flash)",
     )
 
     # Prompt & Evidence Context Bounds

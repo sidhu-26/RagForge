@@ -9,6 +9,7 @@ Defines:
 
 import abc
 import asyncio
+import contextlib
 import logging
 import time
 from dataclasses import dataclass
@@ -312,6 +313,208 @@ class AzureOpenAIGenerationProvider(GenerationProvider):
         )
 
 
+class GeminiGenerationProvider(GenerationProvider):
+    """Production provider for Google Gemini Developer API.
+
+    Uses endpoint format:
+    https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent
+    """
+
+    BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
+
+    def __init__(
+        self,
+        api_key: str | None,
+        model_name: str | None,
+        timeout_seconds: float = 45.0,
+        max_retries: int = 3,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
+        if not api_key or not api_key.strip():
+            raise GenerationConfigurationError(
+                "Gemini generation provider selected, but "
+                "RAGFORGE_GEMINI_API_KEY is not configured."
+            )
+        if not model_name or not model_name.strip():
+            raise GenerationConfigurationError(
+                "Gemini generation provider selected, but RAGFORGE_GEMINI_MODEL is not configured."
+            )
+
+        self._api_key = api_key.strip()
+        self._model = model_name.strip()
+        self._timeout = timeout_seconds
+        self._max_retries = max_retries
+        self._transport = transport
+
+    @property
+    def provider_name(self) -> str:
+        return "gemini"
+
+    @property
+    def model_name(self) -> str:
+        return self._model
+
+    async def generate(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        temperature: float = 0.0,
+        max_tokens: int = 1024,
+    ) -> GenerationOutput:
+        url = f"{self.BASE_URL}/models/{self._model}:generateContent"
+        headers = {
+            "x-goog-api-key": self._api_key,
+            "Content-Type": "application/json",
+        }
+        payload: dict[str, Any] = {
+            "contents": [
+                {
+                    "role": "user",
+                    "parts": [{"text": user_prompt}],
+                }
+            ],
+            "generationConfig": {
+                "temperature": temperature,
+                "maxOutputTokens": max_tokens,
+            },
+        }
+        if system_prompt and system_prompt.strip():
+            payload["systemInstruction"] = {
+                "parts": [{"text": system_prompt}],
+            }
+
+        attempts = 0
+        last_error: Exception | None = None
+        start_time = time.perf_counter()
+
+        while attempts <= self._max_retries:
+            attempts += 1
+            try:
+                async with httpx.AsyncClient(
+                    timeout=self._timeout, transport=self._transport
+                ) as client:
+                    resp = await client.post(url, headers=headers, json=payload)
+
+                if resp.status_code == 200:
+                    try:
+                        data = resp.json()
+                    except Exception as json_err:
+                        raise GenerationError(
+                            "Gemini returned invalid JSON response",
+                            error_code="GEMINI_INVALID_RESPONSE",
+                        ) from json_err
+
+                    candidates = data.get("candidates", [])
+                    if not candidates:
+                        prompt_feedback = data.get("promptFeedback", {})
+                        block_reason = prompt_feedback.get("blockReason")
+                        msg = (
+                            f"Gemini response contained no candidates (blockReason: {block_reason})"
+                            if block_reason
+                            else "Gemini returned empty candidates array"
+                        )
+                        raise GenerationError(
+                            msg,
+                            error_code="EMPTY_GENERATION_CHOICES",
+                        )
+
+                    first_candidate = candidates[0]
+                    content_obj = first_candidate.get("content", {})
+                    parts = content_obj.get("parts", [])
+
+                    # Extract usable text from parts
+                    text_parts = [
+                        p["text"]
+                        for p in parts
+                        if isinstance(p, dict) and "text" in p and isinstance(p["text"], str)
+                    ]
+                    content = "".join(text_parts)
+
+                    if not content:
+                        finish_reason = first_candidate.get("finishReason", "UNKNOWN")
+                        raise GenerationError(
+                            f"Gemini returned empty text content (finishReason: {finish_reason})",
+                            error_code="EMPTY_GENERATION_CONTENT",
+                        )
+
+                    # Extract usage metadata
+                    usage = data.get("usageMetadata", {})
+                    prompt_tokens = usage.get("promptTokenCount")
+                    completion_tokens = usage.get("candidatesTokenCount")
+                    total_tokens = usage.get("totalTokenCount")
+
+                    elapsed_ms = (time.perf_counter() - start_time) * 1000.0
+
+                    return GenerationOutput(
+                        text=content,
+                        provider_name=self.provider_name,
+                        model_name=self.model_name,
+                        latency_ms=elapsed_ms,
+                        prompt_tokens=prompt_tokens if isinstance(prompt_tokens, int) else None,
+                        completion_tokens=(
+                            completion_tokens if isinstance(completion_tokens, int) else None
+                        ),
+                        total_tokens=total_tokens if isinstance(total_tokens, int) else None,
+                    )
+
+                if resp.status_code == 429:
+                    raw_retry_after = resp.headers.get("Retry-After")
+                    retry_after = 1.5 * attempts
+                    if raw_retry_after:
+                        with contextlib.suppress(ValueError):
+                            retry_after = float(raw_retry_after)
+
+                    logger.warning(
+                        "Gemini generation rate limited (HTTP 429)",
+                        extra={"attempt": attempts, "retry_after": retry_after},
+                    )
+                    if attempts <= self._max_retries:
+                        await asyncio.sleep(retry_after)
+                        continue
+                    raise GenerationRateLimitError()
+
+                if resp.status_code >= 500:
+                    logger.warning(
+                        "Gemini generation server error",
+                        extra={"status_code": resp.status_code, "attempt": attempts},
+                    )
+                    if attempts <= self._max_retries:
+                        await asyncio.sleep(1.0 * (2 ** (attempts - 1)))
+                        continue
+                    raise GenerationError(
+                        f"Gemini service error HTTP {resp.status_code}",
+                        error_code="GEMINI_SERVER_ERROR",
+                    )
+
+                # Client errors (4xx except 429) - do not retry
+                if resp.status_code in (401, 403):
+                    raise GenerationError(
+                        f"Gemini authentication or permission error HTTP {resp.status_code}",
+                        error_code=f"GEMINI_AUTH_ERROR_{resp.status_code}",
+                    )
+
+                raise GenerationError(
+                    f"Gemini API client error HTTP {resp.status_code}",
+                    error_code=f"GEMINI_CLIENT_ERROR_{resp.status_code}",
+                )
+
+            except (httpx.TimeoutException, httpx.NetworkError) as net_err:
+                last_error = net_err
+                logger.warning(
+                    "Network error during Gemini generation call",
+                    extra={"attempt": attempts, "error": type(net_err).__name__},
+                )
+                if attempts <= self._max_retries:
+                    await asyncio.sleep(1.0 * (2 ** (attempts - 1)))
+                    continue
+                break
+
+        raise GenerationError(
+            f"Gemini generation failed after {self._max_retries + 1} attempts: {last_error}",
+            error_code="GENERATION_ATTEMPTS_EXHAUSTED",
+        )
+
+
 def create_generation_provider(settings: Settings) -> GenerationProvider:
     """Factory creating the configured GenerationProvider instance."""
     provider_type = settings.GENERATION_PROVIDER.lower()
@@ -330,6 +533,17 @@ def create_generation_provider(settings: Settings) -> GenerationProvider:
             api_key=api_key_val,
             deployment_name=settings.AZURE_OPENAI_CHAT_DEPLOYMENT_NAME,
             api_version=settings.AZURE_OPENAI_API_VERSION,
+            timeout_seconds=settings.GENERATION_REQUEST_TIMEOUT_SECONDS,
+            max_retries=settings.GENERATION_MAX_RETRIES,
+        )
+
+    if provider_type == "gemini":
+        gemini_api_key_val = (
+            settings.GEMINI_API_KEY.get_secret_value() if settings.GEMINI_API_KEY else None
+        )
+        return GeminiGenerationProvider(
+            api_key=gemini_api_key_val,
+            model_name=settings.GEMINI_MODEL,
             timeout_seconds=settings.GENERATION_REQUEST_TIMEOUT_SECONDS,
             max_retries=settings.GENERATION_MAX_RETRIES,
         )

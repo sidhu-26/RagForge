@@ -45,6 +45,7 @@ from ragforge.services.extractor import (
 from ragforge.services.generation_provider import (
     AzureOpenAIGenerationProvider,
     FakeGenerationProvider,
+    GeminiGenerationProvider,
     GenerationConfigurationError,
     GenerationError,
     GenerationOutput,
@@ -91,6 +92,7 @@ __all__ = [
     "ExtractionError",
     "FakeEmbeddingProvider",
     "FakeGenerationProvider",
+    "GeminiGenerationProvider",
     "GenerationConfigurationError",
     "GenerationError",
     "GenerationOutput",

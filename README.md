@@ -473,6 +473,21 @@ Configure the model provider in `.env`:
      ```
    - **Verification**: Ensure the deployment exists in your Azure subscription before switching. RAGForge fails fast if credentials are not configured.
 
+3. **Google Gemini Mode (`GENERATION_PROVIDER=gemini`)**:
+   - Production adapter for Google Gemini Developer API (e.g. `gemini-2.5-flash`).
+   - **Obtaining an API Key**: Generate an API key through [Google AI Studio](https://aistudio.google.com/).
+   - Configure in `.env`:
+     ```env
+     RAGFORGE_GENERATION_PROVIDER=gemini
+     RAGFORGE_GEMINI_API_KEY=your_gemini_api_key_here
+     RAGFORGE_GEMINI_MODEL=gemini-2.5-flash
+     ```
+   - **Data Handling Notice**: Google's free-tier API terms may log prompt content and completions for model training and quality improvement, and impose stricter rate limits. For enterprise or confidential document intelligence, utilize paid-tier API terms (or disable data logging in Google Cloud Console) before sending confidential documents.
+   - **Running Provider Tests**:
+     ```bash
+     uv run pytest tests/unit/test_generation_provider.py -v
+     ```
+
 #### Question Answering API (`POST /api/v1/ask`)
 Ask a grounded question across all indexed documents or scope to a specific document:
 
