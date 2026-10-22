@@ -1,0 +1,49 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ragforge_api
+    restart: unless-stopped
+    ports:
+      - "${RAGFORGE_PORT:-8000}:8000"
+    environment:
+      - RAGFORGE_ENVIRONMENT=development
+      - RAGFORGE_LOG_LEVEL=INFO
+      - RAGFORGE_HOST=0.0.0.0
+      - RAGFORGE_PORT=8000
+      - RAGFORGE_DATABASE_URL=postgresql+asyncpg://ragforge_user:ragforge_password@postgres:5432/ragforge_db
+      - RAGFORGE_SECRET_KEY=dev_insecure_secret_key_change_in_production_min32chars
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - ragforge_network
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: ragforge_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ragforge_user
+      POSTGRES_PASSWORD: ragforge_password
+      POSTGRES_DB: ragforge_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ragforge_user -d ragforge_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - ragforge_network
+
+volumes:
+  postgres_data:
+    driver: local
+
+networks:
+  ragforge_network:
+    driver: bridge
