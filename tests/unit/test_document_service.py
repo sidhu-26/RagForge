@@ -111,3 +111,38 @@ def test_inspect_file_content_rejects_generic_zip_as_docx() -> None:
     with pytest.raises(DocumentValidationError) as exc:
         inspect_file_content(generic_zip, "archive.zip")
     assert exc.value.status_code == 415
+
+
+def test_document_service_logger_extra_no_logrecord_collisions() -> None:
+    """Regression test: verify logging extra dictionary does not collide with LogRecord keys.
+
+    Python's logging module raises KeyError("Attempt to overwrite %r in LogRecord" % key)
+
+    when extra dictionary contains reserved names like 'filename', 'name', 'msg', 'args', etc.
+    """
+    import logging
+
+    logger = logging.getLogger("ragforge.services.document_service")
+    original_level = logger.level
+    logger.setLevel(logging.INFO)
+    try:
+        # Verify logging with uploaded_filename doesn't raise KeyError
+        logger.info(
+            "Document successfully uploaded and metadata registered",
+            extra={
+                "document_id": "test-uuid",
+                "uploaded_filename": "sample.pdf",
+                "mime_type": "application/pdf",
+                "size_bytes": 1024,
+                "storage_key": "prod/staging/posts/572/sample.pdf",
+            },
+        )
+
+        # Confirm that 'filename' in extra would raise KeyError on Python's LogRecord creation
+        with pytest.raises(KeyError, match="Attempt to overwrite 'filename' in LogRecord"):
+            logger.info(
+                "Test collision",
+                extra={"filename": "should_fail.pdf"},
+            )
+    finally:
+        logger.setLevel(original_level)

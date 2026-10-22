@@ -2,11 +2,15 @@
 
 import abc
 import asyncio
+import logging
 import os
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -142,6 +146,27 @@ class StorageEngine(abc.ABC):
 
         Raises:
             StorageFileNotFoundError: If storage_key does not exist.
+        """
+        pass
+
+    @abc.abstractmethod
+    async def generate_presigned_url(
+        self,
+        storage_key: str,
+        expires_in: int = 3600,
+    ) -> str:
+        """Generate a short-lived URL for downloading the file.
+
+        Args:
+            storage_key: Unique identifier of the file.
+            expires_in: URL lifetime in seconds (default: 3600).
+
+        Returns:
+            str: Secure URL or file URI.
+
+        Raises:
+            StorageFileNotFoundError: If storage_key does not exist.
+            StorageError: If URL generation fails.
         """
         pass
 
@@ -348,3 +373,297 @@ class LocalFilesystemStorage(StorageEngine):
             )
 
         return await asyncio.to_thread(_sync_stat)
+
+    async def generate_presigned_url(
+        self,
+        storage_key: str,
+        expires_in: int = 3600,
+    ) -> str:
+        """Return local file URI for development."""
+        _ = expires_in
+        target_path = self._resolve_safe_path(storage_key)
+        if not await self.exists(storage_key):
+            raise StorageFileNotFoundError(f"Storage object '{storage_key}' not found.")
+        return target_path.as_uri()
+
+
+class S3Storage(StorageEngine):
+    """Production AWS S3-backed storage engine.
+
+    Uploads, streams, downloads, and removes documents in Amazon S3.
+    Integrates with standard AWS credential provider chain while supporting explicit credentials.
+    """
+
+    def __init__(
+        self,
+        bucket_name: str,
+        region_name: str = "ap-south-1",
+        prefix: str = "prod/staging/posts/572/",
+        aws_access_key_id: str | None = None,
+        aws_secret_access_key: str | None = None,
+        aws_session_token: str | None = None,
+        endpoint_url: str | None = None,
+        s3_client: Any = None,
+    ) -> None:
+        if not bucket_name or not bucket_name.strip():
+            raise StorageError("S3 bucket name must not be empty.")
+
+        self._bucket_name = bucket_name.strip()
+        self._region_name = region_name.strip()
+        self._prefix = prefix.strip()
+        if self._prefix and not self._prefix.endswith("/"):
+            self._prefix = f"{self._prefix}/"
+
+        self._endpoint_url = endpoint_url
+        self._client = s3_client
+
+        if self._client is None:
+            import boto3
+            from botocore.config import Config
+
+            client_kwargs: dict[str, Any] = {
+                "region_name": self._region_name,
+                "config": Config(
+                    retries={"max_attempts": 3, "mode": "standard"},
+                    connect_timeout=10,
+                    read_timeout=30,
+                ),
+            }
+            if endpoint_url:
+                client_kwargs["endpoint_url"] = endpoint_url
+            if aws_access_key_id and aws_secret_access_key:
+                client_kwargs["aws_access_key_id"] = aws_access_key_id
+                client_kwargs["aws_secret_access_key"] = aws_secret_access_key
+                if aws_session_token:
+                    client_kwargs["aws_session_token"] = aws_session_token
+
+            self._client = boto3.client("s3", **client_kwargs)
+
+    @property
+    def bucket_name(self) -> str:
+        return self._bucket_name
+
+    @property
+    def region_name(self) -> str:
+        return self._region_name
+
+    @property
+    def prefix(self) -> str:
+        return self._prefix
+
+    def _sanitize_storage_key(self, storage_key: str) -> str:
+        """Validate and sanitize S3 object key."""
+        clean_key = storage_key.strip()
+        if not clean_key:
+            raise StorageSecurityError("Storage key must not be empty.")
+        if clean_key.startswith("/"):
+            clean_key = clean_key.lstrip("/")
+        return clean_key
+
+    async def save(
+        self,
+        storage_key: str,
+        stream: AsyncIterator[bytes],
+    ) -> int:
+        """Upload stream of bytes to S3 using multipart upload or single put."""
+        clean_key = self._sanitize_storage_key(storage_key)
+
+        # Consume stream into chunks
+        chunks: list[bytes] = []
+        total_bytes = 0
+        async for chunk in stream:
+            if chunk:
+                chunks.append(chunk)
+                total_bytes += len(chunk)
+
+        body_bytes = b"".join(chunks)
+
+        # Detect ContentType if possible from storage_key extension
+        import mimetypes
+
+        content_type, _ = mimetypes.guess_type(clean_key)
+        if not content_type:
+            content_type = "application/octet-stream"
+
+        def _sync_put() -> None:
+            from botocore.exceptions import ClientError
+
+            try:
+                self._client.put_object(
+                    Bucket=self._bucket_name,
+                    Key=clean_key,
+                    Body=body_bytes,
+                    ContentType=content_type,
+                )
+            except ClientError as e:
+                raise StorageError(f"Failed to put object in S3 ({clean_key}): {e}") from e
+
+        await asyncio.to_thread(_sync_put)
+        return total_bytes
+
+    async def open_stream(
+        self,
+        storage_key: str,
+        chunk_size: int = 64 * 1024,
+    ) -> AsyncIterator[bytes]:
+        """Stream bytes chunk by chunk from S3 object."""
+        clean_key = self._sanitize_storage_key(storage_key)
+
+        def _get_streaming_body() -> Any:
+            from botocore.exceptions import ClientError
+
+            try:
+                response = self._client.get_object(
+                    Bucket=self._bucket_name,
+                    Key=clean_key,
+                )
+                return response["Body"]
+            except ClientError as e:
+                error_code = e.response.get("Error", {}).get("Code", "")
+                if error_code in ("NoSuchKey", "404"):
+                    raise StorageFileNotFoundError(f"S3 object '{clean_key}' not found.") from e
+                raise StorageError(f"Failed to get S3 object '{clean_key}': {e}") from e
+
+        body = await asyncio.to_thread(_get_streaming_body)
+
+        async def _generator() -> AsyncIterator[bytes]:
+            try:
+                while True:
+                    chunk = await asyncio.to_thread(body.read, chunk_size)
+                    if not chunk:
+                        break
+                    yield chunk
+            finally:
+                await asyncio.to_thread(body.close)
+
+        return _generator()
+
+    async def read_bytes(self, storage_key: str) -> bytes:
+        """Download complete object bytes from S3."""
+        clean_key = self._sanitize_storage_key(storage_key)
+
+        def _sync_read() -> bytes:
+            from botocore.exceptions import ClientError
+
+            try:
+                response = self._client.get_object(
+                    Bucket=self._bucket_name,
+                    Key=clean_key,
+                )
+                body_content: bytes = response["Body"].read()
+                return body_content
+
+            except ClientError as e:
+                error_code = e.response.get("Error", {}).get("Code", "")
+                if error_code in ("NoSuchKey", "404"):
+                    raise StorageFileNotFoundError(f"S3 object '{clean_key}' not found.") from e
+                raise StorageError(f"Failed to read S3 object '{clean_key}': {e}") from e
+
+        return await asyncio.to_thread(_sync_read)
+
+    async def delete(self, storage_key: str) -> bool:
+        """Delete object from S3 if it exists."""
+        clean_key = self._sanitize_storage_key(storage_key)
+
+        # Check existence first
+        exists = await self.exists(clean_key)
+        if not exists:
+            return False
+
+        def _sync_delete() -> None:
+            from botocore.exceptions import ClientError
+
+            try:
+                self._client.delete_object(
+                    Bucket=self._bucket_name,
+                    Key=clean_key,
+                )
+            except ClientError as e:
+                raise StorageError(f"Failed to delete S3 object '{clean_key}': {e}") from e
+
+        await asyncio.to_thread(_sync_delete)
+        return True
+
+    async def exists(self, storage_key: str) -> bool:
+        """Check if object exists in S3 via head_object."""
+        clean_key = self._sanitize_storage_key(storage_key)
+
+        def _sync_head() -> bool:
+            from botocore.exceptions import ClientError
+
+            try:
+                self._client.head_object(
+                    Bucket=self._bucket_name,
+                    Key=clean_key,
+                )
+                return True
+            except ClientError as e:
+                error_code = e.response.get("Error", {}).get("Code", "")
+                if error_code in ("NoSuchKey", "404"):
+                    return False
+                logger.warning(
+                    "S3 head_object error checking existence",
+                    extra={"key": clean_key, "error": str(e)},
+                )
+                return False
+
+        return await asyncio.to_thread(_sync_head)
+
+    async def get_metadata(self, storage_key: str) -> StorageMetadata:
+        """Get object size and last modified date from S3."""
+        clean_key = self._sanitize_storage_key(storage_key)
+
+        def _sync_meta() -> StorageMetadata:
+            from botocore.exceptions import ClientError
+
+            try:
+                response = self._client.head_object(
+                    Bucket=self._bucket_name,
+                    Key=clean_key,
+                )
+                content_length = response.get("ContentLength", 0)
+                last_modified = response.get("LastModified", datetime.now(UTC))
+                if last_modified.tzinfo is None:
+                    last_modified = last_modified.replace(tzinfo=UTC)
+                return StorageMetadata(
+                    storage_key=clean_key,
+                    size_bytes=content_length,
+                    modified_at=last_modified,
+                )
+            except ClientError as e:
+                error_code = e.response.get("Error", {}).get("Code", "")
+                if error_code in ("NoSuchKey", "404"):
+                    raise StorageFileNotFoundError(f"S3 object '{clean_key}' not found.") from e
+                raise StorageError(f"Failed to get S3 object metadata '{clean_key}': {e}") from e
+
+        return await asyncio.to_thread(_sync_meta)
+
+    async def generate_presigned_url(
+        self,
+        storage_key: str,
+        expires_in: int = 3600,
+    ) -> str:
+        """Generate a short-lived presigned URL for secure download."""
+        clean_key = self._sanitize_storage_key(storage_key)
+
+        if not await self.exists(clean_key):
+            raise StorageFileNotFoundError(f"S3 object '{clean_key}' not found.")
+
+        def _sync_presign() -> str:
+            from botocore.exceptions import ClientError
+
+            try:
+                url = self._client.generate_presigned_url(
+                    ClientMethod="get_object",
+                    Params={
+                        "Bucket": self._bucket_name,
+                        "Key": clean_key,
+                    },
+                    ExpiresIn=expires_in,
+                )
+                return str(url)
+            except ClientError as e:
+                msg = f"Failed to generate presigned URL for '{clean_key}': {e}"
+                raise StorageError(msg) from e
+
+        return await asyncio.to_thread(_sync_presign)

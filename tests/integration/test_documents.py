@@ -362,3 +362,30 @@ async def test_get_document_chunks_pagination_and_not_found(
     assert requeue_resp.status_code in (202, 503)  # 202 if Redis up, 503 if down
     if requeue_resp.status_code == 202:
         assert requeue_resp.json()["status"] == "queued"
+
+
+@pytest.mark.asyncio
+async def test_download_document_url_generation(
+    async_client: AsyncClient,
+) -> None:
+    """Test generating a download URL for an uploaded document."""
+    # 404 for missing document
+    missing_id = uuid.uuid4()
+    resp = await async_client.get(f"/api/v1/documents/{missing_id}/download")
+    assert resp.status_code == 404
+
+    # Upload document
+    pdf = make_sample_pdf()
+    files = {"file": ("download_sample.pdf", pdf, "application/pdf")}
+    up_resp = await async_client.post("/api/v1/documents", files=files)
+    assert up_resp.status_code == 201
+    doc_id = up_resp.json()["id"]
+
+    # Request download URL
+    dl_resp = await async_client.get(f"/api/v1/documents/{doc_id}/download?expires_in=1800")
+    assert dl_resp.status_code == 200
+    dl_data = dl_resp.json()
+    assert dl_data["id"] == doc_id
+    assert dl_data["expires_in_seconds"] == 1800
+    assert "download_url" in dl_data
+    assert dl_data["download_url"] != ""

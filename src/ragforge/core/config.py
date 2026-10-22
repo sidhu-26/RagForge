@@ -4,7 +4,7 @@ from enum import StrEnum
 from functools import lru_cache
 from typing import Annotated
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import AliasChoices, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -25,6 +25,13 @@ class LogLevel(StrEnum):
     WARNING = "WARNING"
     ERROR = "ERROR"
     CRITICAL = "CRITICAL"
+
+
+class StorageBackendType(StrEnum):
+    """Supported document storage backends."""
+
+    LOCAL = "local"
+    S3 = "s3"
 
 
 class EmbeddingProviderType(StrEnum):
@@ -99,6 +106,10 @@ class Settings(BaseSettings):
     )
 
     # Document Storage Configuration
+    STORAGE_BACKEND: StorageBackendType = Field(
+        default=StorageBackendType.LOCAL,
+        description="Storage backend for uploaded documents: local | s3",
+    )
     STORAGE_LOCAL_ROOT: str = Field(
         default="data/storage",
         description="Root directory for local filesystem document storage",
@@ -113,7 +124,50 @@ class Settings(BaseSettings):
         default=64 * 1024,  # 64 KB
         ge=4096,
         le=10 * 1024 * 1024,
-        description="Chunk size for streaming uploads to disk and hashing (default 64 KB)",
+        description="Chunk size for streaming uploads and hashing (default 64 KB)",
+    )
+
+    # AWS / S3 Storage Configuration
+    AWS_ACCESS_KEY_ID: SecretStr | None = Field(
+        default=None,
+        validation_alias=AliasChoices("RAGFORGE_AWS_ACCESS_KEY_ID", "AWS_ACCESS_KEY_ID"),
+        description="AWS Access Key ID (optional; standard AWS provider chain fallback)",
+    )
+    AWS_SECRET_ACCESS_KEY: SecretStr | None = Field(
+        default=None,
+        validation_alias=AliasChoices("RAGFORGE_AWS_SECRET_ACCESS_KEY", "AWS_SECRET_ACCESS_KEY"),
+        description="AWS Secret Access Key (optional; standard AWS provider chain fallback)",
+    )
+    AWS_SESSION_TOKEN: SecretStr | None = Field(
+        default=None,
+        validation_alias=AliasChoices("RAGFORGE_AWS_SESSION_TOKEN", "AWS_SESSION_TOKEN"),
+        description="AWS Session Token for temporary credentials (optional)",
+    )
+    S3_BUCKET: str = Field(
+        default="sociofitt-community",
+        validation_alias=AliasChoices(
+            "RAGFORGE_S3_BUCKET", "AWS_STORAGE_BUCKET_NAME", "AWS_S3_BUCKET", "S3_BUCKET"
+        ),
+        description="AWS S3 bucket name for document storage",
+    )
+    S3_REGION: str = Field(
+        default="ap-south-1",
+        validation_alias=AliasChoices(
+            "RAGFORGE_S3_REGION",
+            "AWS_S3_REGION_NAME",
+            "AWS_DEFAULT_REGION",
+            "AWS_REGION",
+            "S3_REGION",
+        ),
+        description="AWS region for the S3 bucket",
+    )
+    S3_PREFIX: str = Field(
+        default="prod/staging/posts/572/",
+        description="Required object key prefix under which all documents are stored",
+    )
+    S3_ENDPOINT_URL: str | None = Field(
+        default=None,
+        description="Custom S3 endpoint URL (optional; for MinIO or LocalStack testing)",
     )
 
     # Redis and ARQ Queue Configuration

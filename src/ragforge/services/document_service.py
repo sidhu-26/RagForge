@@ -13,7 +13,7 @@ from fastapi import UploadFile
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ragforge.core.config import Settings
+from ragforge.core.config import Settings, StorageBackendType
 from ragforge.db.models import Document, DocumentChunk, DocumentStatus
 from ragforge.schemas.chunk import DocumentChunkListResponse, DocumentChunkResponse
 from ragforge.schemas.document import DocumentListResponse, DocumentResponse
@@ -191,7 +191,13 @@ class DocumentService:
 
         # Determine file extension based on validated MIME
         ext = SUPPORTED_MIME_TYPES[detected_mime]
-        storage_key = f"docs/{year_str}/{month_str}/{day_str}/{doc_id.hex}{ext}"
+        if self.settings.STORAGE_BACKEND == StorageBackendType.S3:
+            s3_prefix = self.settings.S3_PREFIX.strip()
+            if s3_prefix and not s3_prefix.endswith("/"):
+                s3_prefix = f"{s3_prefix}/"
+            storage_key = f"{s3_prefix}{doc_id}{ext}"
+        else:
+            storage_key = f"docs/{year_str}/{month_str}/{day_str}/{doc_id.hex}{ext}"
 
         # Setup streaming, hashing, and size limit tracking
         sha256 = hashlib.sha256()
@@ -301,7 +307,7 @@ class DocumentService:
             "Document successfully uploaded and metadata registered",
             extra={
                 "document_id": str(document.id),
-                "filename": document.filename,
+                "uploaded_filename": document.filename,
                 "mime_type": document.mime_type,
                 "size_bytes": document.file_size_bytes,
                 "storage_key": document.storage_key,
@@ -414,6 +420,23 @@ class DocumentService:
         if doc is None:
             raise DocumentNotFoundError(document_id)
         return DocumentResponse.model_validate(doc)
+
+    async def get_document_download_url(
+        self,
+        document_id: uuid.UUID,
+        expires_in: int = 3600,
+    ) -> str:
+        """Generate a short-lived download URL or URI for an authorized document request."""
+        stmt = select(Document).where(Document.id == document_id)
+        result = await self.db.execute(stmt)
+        doc = result.scalar_one_or_none()
+        if doc is None:
+            raise DocumentNotFoundError(document_id)
+
+        return await self.storage.generate_presigned_url(
+            storage_key=doc.storage_key,
+            expires_in=expires_in,
+        )
 
     async def list_documents(self, page: int = 1, page_size: int = 20) -> DocumentListResponse:
         """Fetch paginated document metadata ordered by creation date descending."""

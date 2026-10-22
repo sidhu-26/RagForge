@@ -108,6 +108,7 @@ def test_create_generation_provider_factory() -> None:
     settings_gemini_missing = Settings(
         ENVIRONMENT="testing",
         GENERATION_PROVIDER="gemini",
+        GEMINI_API_KEY=None,
     )
     with pytest.raises(GenerationConfigurationError):
         create_generation_provider(settings_gemini_missing)

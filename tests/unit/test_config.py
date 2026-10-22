@@ -108,3 +108,34 @@ def test_database_custom_pool_settings() -> None:
         assert settings.DB_POOL_RECYCLE == 3600
         assert settings.DB_POOL_PRE_PING is False
         assert settings.DB_ECHO is True
+
+
+def test_storage_settings_defaults_and_s3_aliases() -> None:
+    """Verify default storage settings and alias resolution for S3."""
+    from ragforge.core.config import StorageBackendType
+
+    # Verify default without env overrides or .env file values
+    with patch.dict(os.environ, {}, clear=True):
+        default_settings = Settings(_env_file=None)
+        assert default_settings.STORAGE_BACKEND == StorageBackendType.LOCAL
+        assert default_settings.S3_BUCKET == "sociofitt-community"
+        assert default_settings.S3_REGION == "ap-south-1"
+        assert default_settings.S3_PREFIX == "prod/staging/posts/572/"
+
+    # Test alias resolution from standard AWS environment variables
+    env = {
+        "RAGFORGE_STORAGE_BACKEND": "s3",
+        "AWS_STORAGE_BUCKET_NAME": "custom-community-bucket",
+        "AWS_S3_REGION_NAME": "us-east-1",
+        "AWS_ACCESS_KEY_ID": "test-key-id",
+        "AWS_SECRET_ACCESS_KEY": "test-secret-key",
+    }
+    with patch.dict(os.environ, env, clear=False):
+        s3_settings = Settings()
+        assert s3_settings.STORAGE_BACKEND == StorageBackendType.S3
+        assert s3_settings.S3_BUCKET == "custom-community-bucket"
+        assert s3_settings.S3_REGION == "us-east-1"
+        assert s3_settings.AWS_ACCESS_KEY_ID is not None
+        assert s3_settings.AWS_ACCESS_KEY_ID.get_secret_value() == "test-key-id"
+        assert s3_settings.AWS_SECRET_ACCESS_KEY is not None
+        assert s3_settings.AWS_SECRET_ACCESS_KEY.get_secret_value() == "test-secret-key"

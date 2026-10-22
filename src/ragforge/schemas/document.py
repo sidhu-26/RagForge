@@ -117,3 +117,21 @@ class DocumentDeleteResponse(BaseModel):
         default="Document and associated storage removed successfully",
         description="Informational deletion summary",
     )
+
+
+class DocumentDownloadResponse(BaseModel):
+    """Presigned download URL response for a document."""
+
+    id: uuid.UUID = Field(
+        ...,
+        description="UUID of document to download",
+    )
+    download_url: str = Field(
+        ...,
+        description="Presigned download or direct access URL for the document",
+    )
+    expires_in_seconds: int = Field(
+        ...,
+        description="Expiration time in seconds for the presigned URL",
+        examples=[3600],
+    )

@@ -61,13 +61,14 @@ from ragforge.services.queue import QueueError, QueueService, get_queue_service
 from ragforge.services.retrieval_service import RetrievalError, RetrievalService
 from ragforge.services.storage import (
     LocalFilesystemStorage,
+    S3Storage,
     StorageEngine,
     StorageError,
     StorageFileNotFoundError,
     StorageMetadata,
     StorageSecurityError,
 )
-from ragforge.services.storage_provider import get_storage_engine
+from ragforge.services.storage_provider import create_storage_engine, get_storage_engine
 
 __all__ = [
     "AskService",
@@ -106,6 +107,7 @@ __all__ = [
     "QueueService",
     "RetrievalError",
     "RetrievalService",
+    "S3Storage",
     "StorageEngine",
     "StorageError",
     "StorageFileNotFoundError",
@@ -116,6 +118,7 @@ __all__ = [
     "build_evidence_and_prompts",
     "create_embedding_provider",
     "create_generation_provider",
+    "create_storage_engine",
     "estimate_token_count",
     "get_queue_service",
     "get_storage_engine",

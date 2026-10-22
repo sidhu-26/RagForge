@@ -38,7 +38,8 @@ from ragforge.services.extractor import (
     ExtractionError,
     MalformedDocumentError,
 )
-from ragforge.services.storage import LocalFilesystemStorage, StorageEngine, StorageError
+from ragforge.services.storage import StorageEngine, StorageError
+from ragforge.services.storage_provider import create_storage_engine
 
 logger = logging.getLogger(__name__)
 
@@ -108,8 +109,9 @@ async def process_document(
     # 2. Mark document as PROCESSING
     logger.info(
         "Transitioning document status to PROCESSING",
-        extra={"document_id": str(doc_uuid), "filename": document.filename},
+        extra={"document_id": str(doc_uuid), "document_filename": document.filename},
     )
+
     document.status = DocumentStatus.PROCESSING.value
     document.error_code = None
     document.error_message = None
@@ -273,7 +275,7 @@ async def startup(ctx: dict[str, Any]) -> None:
         autoflush=False,
         expire_on_commit=False,
     )
-    storage = LocalFilesystemStorage(settings.STORAGE_LOCAL_ROOT)
+    storage = create_storage_engine(settings)
     embedding_provider = create_embedding_provider(settings)
 
     ctx["engine"] = engine

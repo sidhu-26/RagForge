@@ -19,6 +19,7 @@ from ragforge.db.session import get_db
 from ragforge.schemas.chunk import DocumentChunkListResponse
 from ragforge.schemas.document import (
     DocumentDeleteResponse,
+    DocumentDownloadResponse,
     DocumentListResponse,
     DocumentResponse,
 )
@@ -162,6 +163,52 @@ async def delete_document(
     try:
         await doc_service.delete_document(document_id)
         return DocumentDeleteResponse(id=document_id)
+    except DocumentNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Document '{document_id}' was not found.",
+        ) from exc
+
+
+@router.get(
+    "/{document_id}/download",
+    response_model=DocumentDownloadResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Get presigned download URL for document source file",
+    description=(
+        "Generate a short-lived presigned URL or direct access URL to download the "
+        "original document. Preserves private access controls without making storage "
+        "buckets public."
+    ),
+    responses={
+        status.HTTP_200_OK: {
+            "description": "Presigned download URL successfully generated.",
+        },
+        status.HTTP_404_NOT_FOUND: {
+            "description": "Document not found.",
+        },
+    },
+)
+async def download_document(
+    document_id: uuid.UUID,
+    expires_in: int = Query(
+        default=3600,
+        ge=60,
+        le=86400,
+        description="Presigned URL validity duration in seconds (1 min to 24 hours)",
+    ),
+    doc_service: DocumentService = Depends(get_document_service),
+) -> DocumentDownloadResponse:
+    """Generate a presigned download URL for the document's original file."""
+    try:
+        url = await doc_service.get_document_download_url(
+            document_id=document_id, expires_in=expires_in
+        )
+        return DocumentDownloadResponse(
+            id=document_id,
+            download_url=url,
+            expires_in_seconds=expires_in,
+        )
     except DocumentNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
